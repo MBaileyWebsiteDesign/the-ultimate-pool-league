@@ -29,7 +29,11 @@ const divisions = divisionNames.map((name, order) => ({
   leagueId: league.id,
   name,
   order,
+  entryType: 'singles',
+  scheduling: 'round_robin_single',
+  legsPerMatch: null,
   playerIds: [],
+  teamIds: [],
   fixturesGenerated: false,
 }));
 db.divisions.push(...divisions);
@@ -61,6 +65,8 @@ rounds.forEach((pairs, roundIndex) => {
       awayFrameScore: 0,
       status: 'scheduled',
       winnerPlayerId: null,
+      nextFixtureId: null,
+      nextFixtureSlot: null,
     });
   });
 });

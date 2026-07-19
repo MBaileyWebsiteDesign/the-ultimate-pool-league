@@ -19,6 +19,7 @@ const EMPTY_STATE = {
   leagues: [],
   divisions: [],
   players: [],
+  teams: [],
   divisionPlayers: [],
   fixtures: [],
 };
@@ -33,7 +34,10 @@ function ensureDataFile() {
 export function readDb() {
   ensureDataFile();
   const raw = readFileSync(DATA_FILE, 'utf-8');
-  return JSON.parse(raw);
+  const state = JSON.parse(raw);
+  // Backfill for databases created before `teams` existed.
+  if (!state.teams) state.teams = [];
+  return state;
 }
 
 export function writeDb(state) {
