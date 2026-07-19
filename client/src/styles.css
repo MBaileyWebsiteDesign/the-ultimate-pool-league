@@ -19,6 +19,9 @@ body {
 .app-header {
   background: var(--green);
   padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .brand {
@@ -26,6 +29,39 @@ body {
   font-size: 1.25rem;
   font-weight: 700;
   text-decoration: none;
+}
+
+.header-link {
+  color: white;
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 600;
+  opacity: 0.9;
+}
+
+.header-link:hover { opacity: 1; text-decoration: underline; }
+
+.header-link-button {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.header-admin {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.admin-badge {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 3px 10px;
+  border-radius: 999px;
 }
 
 .app-main {

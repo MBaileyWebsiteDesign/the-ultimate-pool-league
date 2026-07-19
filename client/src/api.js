@@ -1,8 +1,14 @@
+import { getStoredToken } from './AuthContext.jsx';
+
 const BASE = '/api';
 
 async function request(path, options = {}) {
+  const token = getStoredToken();
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
     ...options,
   });
   const body = await res.json().catch(() => ({}));
@@ -13,6 +19,9 @@ async function request(path, options = {}) {
 }
 
 export const api = {
+  login: (username, password) =>
+    request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+
   getLeagues: () => request('/leagues'),
   createLeague: (data) => request('/leagues', { method: 'POST', body: JSON.stringify(data) }),
   getLeague: (id) => request(`/leagues/${id}`),

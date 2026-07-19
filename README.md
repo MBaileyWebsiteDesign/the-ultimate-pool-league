@@ -56,13 +56,37 @@ day one. Those are called out explicitly in the roadmap below.
   reversible for corrections.
 - **Live standings**: points (2 for a win), frames for/against, frame difference,
   ranked automatically from completed results.
+- **Admin login**: creating a league or a division requires signing in as admin
+  (username `Admin`, password `Admin12!@` by default - see **Admin login** below).
+  Browsing leagues, registering players, generating fixtures and scoring matches all
+  remain open to anyone, since that's the day-to-day captain/player workflow.
 
 ## What's deliberately out of scope for v1
 
 Team leagues/doubles-triples, elimination/knockout formats, handicaps, online
 entry/payment, tablet-specific UI, stream overlays and timers, table booking, player
-statistics beyond the standings table, and multi-user accounts/permissions (this build
-has no login — it's a single shared admin view). See **Roadmap** below.
+statistics beyond the standings table, and per-user accounts (there's one shared admin
+account, not individual logins per league admin/captain/player). See **Roadmap** below.
+
+## Admin login
+
+League and division creation are gated behind a single admin account:
+
+- Username: `Admin`
+- Password: `Admin12!@`
+
+Override these via the `ADMIN_USERNAME` and `ADMIN_PASSWORD` environment variables
+before deploying anywhere real people can reach it - the defaults are checked into this
+repo and are not a secret. Also set `SESSION_SECRET` to a random string in production;
+it's the key used to sign login tokens (`server/src/auth.js`), and the checked-in
+default is only safe for local use.
+
+This is a deliberately minimal auth model: one hardcoded account, a hand-rolled signed
+token (HMAC-SHA256 via Node's built-in `crypto`, no extra dependency) with a 24-hour
+expiry, stored in the browser's `localStorage`. It's enough to stop casual/anonymous
+league creation, but it is **not** a substitute for real per-user accounts with hashed
+passwords - see the roadmap below for what a multi-admin, role-aware version would need
+(league admin vs. captain vs. player, each with their own login).
 
 ## Architecture
 
@@ -136,11 +160,13 @@ proxies `/api` requests to the Express server on port 4000, so run both at once.
 | GET | `/api/fixtures/:id` | Fixture detail |
 | POST | `/api/fixtures/:id/frames` | Record a frame winner |
 | DELETE | `/api/fixtures/:id/frames/last` | Undo the last recorded frame |
+| POST | `/api/auth/login` | Admin login, returns a signed token |
 
 ## Roadmap toward RackEmApp feature parity
 
-1. Swap the JSON file store for Postgres and add authentication/roles (league admin
-   vs. player vs. captain), since a real league needs more than one trusted operator.
+1. Swap the JSON file store for Postgres and replace the single hardcoded admin
+   account with real per-user accounts and roles (league admin vs. player vs.
+   captain), since a real league needs more than one trusted operator.
 2. Additional scheduling methods: home/away double round robin, single/double
    elimination, mini-knockouts, and the ability to mix formats within one competition.
 3. Team leagues (players grouped into teams, with team-level fixtures made up of

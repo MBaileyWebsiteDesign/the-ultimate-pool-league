@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api.js';
+import { useAuth } from '../AuthContext.jsx';
 
 export default function LeagueList() {
+  const { isAdmin } = useAuth();
   const [leagues, setLeagues] = useState([]);
   const [error, setError] = useState('');
   const [form, setForm] = useState({ name: '', raceTo: 6 });
@@ -31,12 +33,14 @@ export default function LeagueList() {
     <div>
       <div className="page-header">
         <h1>Leagues</h1>
-        <button className="btn" onClick={() => setShowForm((v) => !v)}>
-          {showForm ? 'Cancel' : '+ New League'}
-        </button>
+        {isAdmin && (
+          <button className="btn" onClick={() => setShowForm((v) => !v)}>
+            {showForm ? 'Cancel' : '+ New League'}
+          </button>
+        )}
       </div>
 
-      {showForm && (
+      {showForm && isAdmin && (
         <form className="card form" onSubmit={onSubmit}>
           <label>
             League name

@@ -8,6 +8,7 @@ import { readDb, writeDb } from './db.js';
 import { generateRoundRobin } from './services/roundRobin.js';
 import { computeStandings } from './services/standings.js';
 import { ApiError } from './errors.js';
+import { login, requireAdmin } from './auth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.join(__dirname, '..', '..', 'client', 'dist');
@@ -24,6 +25,18 @@ const asyncRoute = (fn) => (req, res, next) => {
   }
 };
 
+// ---------- Auth ----------
+// Single hardcoded admin account (see auth.js for why). Only league and
+// division *creation* are gated behind this for now, per the current
+// requirement - player management, fixture generation and match scoring
+// remain open. Tighten further (e.g. captain-only scoring) later if needed.
+
+app.post('/api/auth/login', asyncRoute((req, res) => {
+  const { username, password } = req.body;
+  const { token, expiresAt } = login(username, password);
+  res.json({ token, expiresAt });
+}));
+
 // ---------- Leagues ----------
 
 app.get('/api/leagues', asyncRoute((req, res) => {
@@ -31,7 +44,7 @@ app.get('/api/leagues', asyncRoute((req, res) => {
   res.json(db.leagues);
 }));
 
-app.post('/api/leagues', asyncRoute((req, res) => {
+app.post('/api/leagues', requireAdmin, asyncRoute((req, res) => {
   const { name, sport = 'English 8-Ball Pool', matchFormat = 'singles', raceTo = 6, scheduling = 'round_robin_single' } = req.body;
   if (!name || !name.trim()) throw new ApiError(400, 'League name is required');
 
@@ -60,7 +73,7 @@ app.get('/api/leagues/:id', asyncRoute((req, res) => {
 
 // ---------- Divisions ----------
 
-app.post('/api/leagues/:leagueId/divisions', asyncRoute((req, res) => {
+app.post('/api/leagues/:leagueId/divisions', requireAdmin, asyncRoute((req, res) => {
   const { name, order = 0 } = req.body;
   if (!name || !name.trim()) throw new ApiError(400, 'Division name is required');
 

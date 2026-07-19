@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
+import { useAuth } from '../AuthContext.jsx';
 
 export default function LeagueDetail() {
+  const { isAdmin } = useAuth();
   const { leagueId } = useParams();
   const [league, setLeague] = useState(null);
   const [error, setError] = useState('');
@@ -41,12 +43,14 @@ export default function LeagueDetail() {
             {league.sport} · {league.format.matchFormat}, race to {league.format.raceTo}, single round robin
           </p>
         </div>
-        <button className="btn" onClick={() => setShowForm((v) => !v)}>
-          {showForm ? 'Cancel' : '+ New Division'}
-        </button>
+        {isAdmin && (
+          <button className="btn" onClick={() => setShowForm((v) => !v)}>
+            {showForm ? 'Cancel' : '+ New Division'}
+          </button>
+        )}
       </div>
 
-      {showForm && (
+      {showForm && isAdmin && (
         <form className="card form" onSubmit={onAddDivision}>
           <label>
             Division name
