@@ -1,0 +1,46 @@
+// Lightweight JSON-file persistence layer.
+//
+// Why not a real database engine for v1?
+// This MVP prioritizes zero external dependencies (no native bindings, no
+// DB server to provision) so the whole app can be cloned and run with
+// `npm install && npm start`. The data-access API below (readDb/writeDb via
+// the exported `db` object) is the seam where a production build would swap
+// this out for Postgres/Prisma without touching route or service code -
+// every route goes through this module, never the filesystem directly.
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import path from 'path';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const DATA_DIR = path.join(__dirname, 'data');
+const DATA_FILE = path.join(DATA_DIR, 'db.json');
+
+const EMPTY_STATE = {
+  leagues: [],
+  divisions: [],
+  players: [],
+  divisionPlayers: [],
+  fixtures: [],
+};
+
+function ensureDataFile() {
+  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+  if (!existsSync(DATA_FILE)) {
+    writeFileSync(DATA_FILE, JSON.stringify(EMPTY_STATE, null, 2));
+  }
+}
+
+export function readDb() {
+  ensureDataFile();
+  const raw = readFileSync(DATA_FILE, 'utf-8');
+  return JSON.parse(raw);
+}
+
+export function writeDb(state) {
+  ensureDataFile();
+  writeFileSync(DATA_FILE, JSON.stringify(state, null, 2));
+}
+
+export function resetDb() {
+  writeDb(structuredClone(EMPTY_STATE));
+}
