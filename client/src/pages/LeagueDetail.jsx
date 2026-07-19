@@ -9,6 +9,9 @@ export default function LeagueDetail() {
   const [league, setLeague] = useState(null);
   const [error, setError] = useState('');
   const [name, setName] = useState('');
+  const [entryType, setEntryType] = useState('singles');
+  const [legsPerMatch, setLegsPerMatch] = useState(5);
+  const [scheduling, setScheduling] = useState('round_robin_single');
   const [showForm, setShowForm] = useState(false);
 
   const load = () => api.getLeague(leagueId).then(setLeague).catch((e) => setError(e.message));
@@ -22,8 +25,17 @@ export default function LeagueDetail() {
     e.preventDefault();
     setError('');
     try {
-      await api.createDivision(leagueId, { name, order: league.divisions.length });
+      await api.createDivision(leagueId, {
+        name,
+        order: league.divisions.length,
+        entryType,
+        scheduling,
+        ...(entryType === 'teams' ? { legsPerMatch: Number(legsPerMatch) } : {}),
+      });
       setName('');
+      setEntryType('singles');
+      setLegsPerMatch(5);
+      setScheduling('round_robin_single');
       setShowForm(false);
       load();
     } catch (err) {
@@ -56,6 +68,32 @@ export default function LeagueDetail() {
             Division name
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Division 1" required />
           </label>
+          <label>
+            Entry type
+            <select value={entryType} onChange={(e) => setEntryType(e.target.value)}>
+              <option value="singles">Singles (one player vs one player)</option>
+              <option value="teams">Teams (team vs team, made up of legs)</option>
+            </select>
+          </label>
+          {entryType === 'teams' && (
+            <label>
+              Legs per match
+              <input
+                type="number"
+                min="1"
+                value={legsPerMatch}
+                onChange={(e) => setLegsPerMatch(e.target.value)}
+                required
+              />
+            </label>
+          )}
+          <label>
+            Format
+            <select value={scheduling} onChange={(e) => setScheduling(e.target.value)}>
+              <option value="round_robin_single">Round robin (everyone plays each other once)</option>
+              <option value="knockout_single_elim">Knockout (single elimination)</option>
+            </select>
+          </label>
           <button className="btn btn-primary" type="submit">
             Add Division
           </button>
@@ -69,7 +107,12 @@ export default function LeagueDetail() {
           <Link key={division.id} to={`/divisions/${division.id}`} className="card card-link">
             <h2>{division.name}</h2>
             <p className="muted">
-              {division.playerIds.length} player{division.playerIds.length === 1 ? '' : 's'} ·{' '}
+              {division.entryType === 'teams'
+                ? `${division.teamIds.length} team${division.teamIds.length === 1 ? '' : 's'} · ${division.legsPerMatch} legs/match`
+                : `${division.playerIds.length} player${division.playerIds.length === 1 ? '' : 's'}`}
+              {' · '}
+              {division.scheduling === 'knockout_single_elim' ? 'Knockout' : 'Round robin'}
+              {' · '}
               {division.fixturesGenerated ? 'fixtures generated' : 'not started'}
             </p>
           </Link>
