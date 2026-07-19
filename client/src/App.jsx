@@ -3,6 +3,7 @@ import LeagueList from './pages/LeagueList.jsx';
 import LeagueDetail from './pages/LeagueDetail.jsx';
 import DivisionDetail from './pages/DivisionDetail.jsx';
 import FixtureDetail from './pages/FixtureDetail.jsx';
+import PlayerProfile from './pages/PlayerProfile.jsx';
 import Login from './pages/Login.jsx';
 import { AuthProvider, useAuth } from './AuthContext.jsx';
 
@@ -50,6 +51,7 @@ function AppShell() {
           <Route path="/leagues/:leagueId" element={<LeagueDetail />} />
           <Route path="/divisions/:divisionId" element={<DivisionDetail />} />
           <Route path="/fixtures/:fixtureId" element={<FixtureDetail />} />
+          <Route path="/players/:playerId" element={<PlayerProfile />} />
         </Routes>
       </main>
     </div>
