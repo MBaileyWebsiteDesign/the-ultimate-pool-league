@@ -40,33 +40,59 @@ day one. Those are called out explicitly in the roadmap below.
 
 ## What's implemented
 
-- **Leagues** with a configurable format (match type, race-to-N frames, scheduling
-  method). Currently one scheduling method is implemented: single round robin (every
-  player in a division plays every other player exactly once).
+- **Leagues** with a configurable format (match type, race-to-N frames, default
+  scheduling method).
 - **Divisions** within a league (unlimited; seeded with the requested six: Premier
-  League, Division 1–5).
-- **Player registration** per division. The player list locks once fixtures are
-  generated, which mirrors how real leagues avoid re-shuffling a season that's already
-  started.
-- **Automatic fixture generation** using the standard circle-method round-robin
-  algorithm, correctly handling odd numbers of players via a bye.
+  League, Division 1–5), each independently configured along two axes:
+  - **Entry type** — `singles` (one player vs. one player) or `teams` (team vs. team).
+  - **Scheduling** — `round_robin_single` (everyone/every team plays everyone/every
+    team else exactly once) or `knockout_single_elim` (single-elimination bracket).
+  These are independent choices, so e.g. a knockout team cup and a round-robin singles
+  division can coexist in the same league.
+- **Team leagues**: teams are rosters of players; a team fixture is a best-of-N "legs"
+  match (N = `legsPerMatch`, admin-configurable per division), each leg a nominated
+  player vs. nominated player mini-match scored exactly like a singles frame race. The
+  team match is decided the moment one side has an unreachable majority of legs (mirrors
+  the singles race-to-N "stop once it's decided" behaviour); an even `legsPerMatch` can
+  end level, recorded as a drawn team match (2/1/0 league points for win/draw/loss). Use
+  an odd `legsPerMatch` for knockout team divisions so every match has a winner to
+  advance.
+- **Knockout / single-elimination format**: standard bracket seeding with byes for
+  non-power-of-2 entrant counts (see `server/src/services/bracket.js`), automatic bye
+  resolution (a bye winner advances without a match, but two bye-advanced entrants
+  meeting in a later round always play a real match — a slot merely waiting on an
+  earlier round is never confused with a genuine bye), winner propagation into the next
+  round's fixture, and an undo-lock: once a result has advanced a player/team to the
+  next round, that frame/leg can't be undone from the completed fixture (it would
+  silently corrupt the bracket) — the fixture detail page shows "TBD" for slots that
+  haven't been decided yet.
+- **Player registration** per division (singles) or per team (teams). Rosters lock once
+  fixtures are generated, which mirrors how real leagues avoid re-shuffling a season
+  that's already started.
+- **Automatic fixture generation**: circle-method round-robin (handling odd counts via
+  a bye) or knockout bracket generation, depending on the division's `scheduling`.
 - **Frame-by-frame scoring**: each frame is recorded as a single winner; the match ends
-  automatically the moment either player reaches the race target (e.g. race to 6 ends
+  automatically the moment either side reaches the race target (e.g. race to 6 ends
   at 6–5, 6–0, 6–3, etc. — never plays on past the target), with the last frame
-  reversible for corrections.
-- **Live standings**: points (2 for a win), frames for/against, frame difference,
-  ranked automatically from completed results.
-- **Admin login**: creating a league or a division requires signing in as admin
-  (username `Admin`, password `Admin12!@` by default - see **Admin login** below).
-  Browsing leagues, registering players, generating fixtures and scoring matches all
-  remain open to anyone, since that's the day-to-day captain/player workflow.
+  reversible for corrections (unless that result already advanced a bracket).
+- **Live standings**: singles divisions rank by points (2 for a win)/frames
+  for/against/difference; team divisions rank by points (2/1/0 for win/draw/loss)/legs
+  for/against/difference — both computed automatically from completed results.
+- **Player stats & profiles**: every player has a profile page showing career record
+  (played/won/lost, frames for/against, frame difference) aggregated across both singles
+  fixtures and legs played inside team fixtures, plus a head-to-head breakdown per
+  opponent and a full match history linking back to each fixture.
+- **Admin login**: creating a league or division requires signing in as admin (username
+  `Admin`, password `Admin12!@` by default - see **Admin login** below). Browsing
+  leagues, registering players/teams, generating fixtures and scoring matches all remain
+  open to anyone, since that's the day-to-day captain/player workflow.
 
 ## What's deliberately out of scope for v1
 
-Team leagues/doubles-triples, elimination/knockout formats, handicaps, online
-entry/payment, tablet-specific UI, stream overlays and timers, table booking, player
-statistics beyond the standings table, and per-user accounts (there's one shared admin
-account, not individual logins per league admin/captain/player). See **Roadmap** below.
+Handicaps, online entry/payment, tablet-specific UI, stream overlays and timers, table
+booking, double-elimination/mini-knockout/mixed formats, and per-user accounts (there's
+one shared admin account, not individual logins per league admin/captain/player). See
+**Roadmap** below.
 
 ## Admin login
 
@@ -94,16 +120,22 @@ passwords - see the roadmap below for what a multi-admin, role-aware version wou
 pool-league/
   server/            Node.js + Express REST API
     src/
-      index.js        Routes, static hosting of the built client
-      db.js            JSON-file persistence layer (see note below)
+      index.js         Routes, static hosting of the built client
+      db.js             JSON-file persistence layer (see note below)
+      auth.js           Admin login + HMAC-signed session tokens
       errors.js
       services/
-        roundRobin.js  Circle-method scheduler
-        standings.js   Points table calculation
-        seed.js        Seeds "Top Spin Singles" with 6 divisions + demo data
+        roundRobin.js    Circle-method scheduler (singles + teams)
+        bracket.js       Single-elimination bracket seeding with bye handling
+        standings.js     Singles points table calculation
+        teamStandings.js Team points table calculation
+        playerProfile.js Career stats + head-to-head aggregation for a player
+        seed.js          Seeds "Top Spin Singles" with 6 divisions + demo data
   client/            React (Vite) single-page app
     src/
-      pages/           LeagueList, LeagueDetail, DivisionDetail, FixtureDetail
+      pages/           LeagueList, LeagueDetail, DivisionDetail, FixtureDetail,
+                        PlayerProfile, Login
+      AuthContext.jsx  Admin session state (token storage, login/logout)
       api.js           Fetch wrapper for the REST API
 ```
 
@@ -117,11 +149,25 @@ script, not a rewrite. This is the top item in the roadmap.
 ## Data model
 
 - `League`: `id, name, sport, format { matchFormat, raceTo, scheduling }`
-- `Division`: `id, leagueId, name, order, playerIds[], fixturesGenerated`
+- `Division`: `id, leagueId, name, order, entryType ('singles'|'teams'), scheduling
+  ('round_robin_single'|'knockout_single_elim'), legsPerMatch (teams only), playerIds[]
+  (singles only), teamIds[] (teams only), fixturesGenerated`
 - `Player`: `id, name`
-- `Fixture`: `id, leagueId, divisionId, round, homePlayerId, awayPlayerId, raceTo, frames[], homeFrameScore, awayFrameScore, status, winnerPlayerId`
+- `Team`: `id, divisionId, name, playerIds[]`
+- Singles `Fixture`: `id, leagueId, divisionId, round, homePlayerId, awayPlayerId,
+  raceTo, frames[], homeFrameScore, awayFrameScore, status, winnerPlayerId,
+  nextFixtureId, nextFixtureSlot`
   - `frames[]`: `{ frameNumber, winnerPlayerId }` — the source of truth; scores are
     derived from this list, never stored independently of it.
+- Team `Fixture`: `id, leagueId, divisionId, round, homeTeamId, awayTeamId, legs[],
+  homeLegsWon, awayLegsWon, status, winnerTeamId (null = draw), nextFixtureId,
+  nextFixtureSlot`
+  - `legs[]`: `{ legNumber, homePlayerId, awayPlayerId, frames[], homeFrameScore,
+    awayFrameScore, status, winnerPlayerId, raceTo }` — one leg per nominated
+    player-vs-player mini-match, structurally identical to a singles fixture.
+  - `nextFixtureId`/`nextFixtureSlot` (`'home'|'away'`) link a knockout fixture to the
+    one its winner advances into; both are `null` for round-robin fixtures and for a
+    knockout final.
 
 ## Running it locally
 
@@ -150,29 +196,34 @@ proxies `/api` requests to the Express server on port 4000, so run both at once.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET/POST | `/api/leagues` | List / create leagues |
-| GET | `/api/leagues/:id` | League + its divisions |
-| POST | `/api/leagues/:leagueId/divisions` | Add a division |
-| GET | `/api/divisions/:id` | Division + players, fixtures, standings |
-| POST | `/api/divisions/:id/players` | Register a player |
-| DELETE | `/api/divisions/:id/players/:playerId` | Remove a player (pre-fixtures only) |
-| POST | `/api/divisions/:id/generate-fixtures` | Generate the round-robin fixture list |
-| GET | `/api/fixtures/:id` | Fixture detail |
-| POST | `/api/fixtures/:id/frames` | Record a frame winner |
-| DELETE | `/api/fixtures/:id/frames/last` | Undo the last recorded frame |
 | POST | `/api/auth/login` | Admin login, returns a signed token |
+| GET/POST | `/api/leagues` | List / create leagues (create requires admin) |
+| GET | `/api/leagues/:id` | League + its divisions |
+| POST | `/api/leagues/:leagueId/divisions` | Add a division (requires admin; accepts `entryType`, `scheduling`, `legsPerMatch`) |
+| GET | `/api/divisions/:id` | Division + players/teams, fixtures, standings |
+| POST/DELETE | `/api/divisions/:id/players` | Register / remove a player (singles, pre-fixtures only) |
+| POST/DELETE | `/api/divisions/:id/teams` | Add / remove a team (teams, pre-fixtures only) |
+| POST/DELETE | `/api/teams/:teamId/players` | Add / remove a player on a team roster |
+| POST | `/api/divisions/:id/generate-fixtures` | Generate the fixture list (round robin or knockout bracket, per the division's `scheduling`) |
+| GET | `/api/fixtures/:id` | Fixture detail (singles or team, includes `bothEntrantsKnown` for knockout TBD slots) |
+| POST | `/api/fixtures/:id/frames` | Record a frame winner (singles) |
+| DELETE | `/api/fixtures/:id/frames/last` | Undo the last recorded frame (blocked once the result has advanced a bracket) |
+| POST | `/api/fixtures/:id/legs/:legNumber/nominate` | Nominate the two players for a team-fixture leg |
+| POST | `/api/fixtures/:id/legs/:legNumber/frames` | Record a frame winner within a leg |
+| DELETE | `/api/fixtures/:id/legs/:legNumber/frames/last` | Undo the last frame within a leg |
+| GET | `/api/players/:id` | Player profile: career record, head-to-head, match history |
 
 ## Roadmap toward RackEmApp feature parity
 
 1. Swap the JSON file store for Postgres and replace the single hardcoded admin
    account with real per-user accounts and roles (league admin vs. player vs.
    captain), since a real league needs more than one trusted operator.
-2. Additional scheduling methods: home/away double round robin, single/double
-   elimination, mini-knockouts, and the ability to mix formats within one competition.
-3. Team leagues (players grouped into teams, with team-level fixtures made up of
-   multiple individual frames/legs) alongside the existing singles format.
-4. Player statistics beyond the league table: head-to-head history, form guides,
-   break-and-continue / century-style stats if relevant to 8-ball.
+2. Further scheduling methods: home/away double round robin, double elimination,
+   mini-knockouts, and the ability to mix formats within one competition.
+3. Seeded/ranked knockout brackets (current v1 seeds in registration order, not by
+   past performance) and best-of-N handicaps.
+4. Deeper player statistics: form guides, break-and-continue / century-style stats if
+   relevant to 8-ball, a "trophy cabinet" across seasons.
 5. Live-scoring niceties RackEmApp already has: tablet-optimized scoring UI, stream
    overlay endpoint, shot/match timers — valuable but explicitly deferred until the
    core league engine above is solid.

@@ -40,4 +40,30 @@ export const api = {
   recordFrame: (fixtureId, winnerPlayerId) =>
     request(`/fixtures/${fixtureId}/frames`, { method: 'POST', body: JSON.stringify({ winnerPlayerId }) }),
   undoLastFrame: (fixtureId) => request(`/fixtures/${fixtureId}/frames/last`, { method: 'DELETE' }),
+
+  // Teams (team divisions only)
+  createTeam: (divisionId, name) =>
+    request(`/divisions/${divisionId}/teams`, { method: 'POST', body: JSON.stringify({ name }) }),
+  removeTeam: (divisionId, teamId) =>
+    request(`/divisions/${divisionId}/teams/${teamId}`, { method: 'DELETE' }),
+  addTeamPlayer: (teamId, name) =>
+    request(`/teams/${teamId}/players`, { method: 'POST', body: JSON.stringify({ name }) }),
+  removeTeamPlayer: (teamId, playerId) =>
+    request(`/teams/${teamId}/players/${playerId}`, { method: 'DELETE' }),
+
+  // Leg scoring (team fixtures only)
+  nominateLeg: (fixtureId, legNumber, homePlayerId, awayPlayerId) =>
+    request(`/fixtures/${fixtureId}/legs/${legNumber}/nominate`, {
+      method: 'POST',
+      body: JSON.stringify({ homePlayerId, awayPlayerId }),
+    }),
+  recordLegFrame: (fixtureId, legNumber, winnerPlayerId) =>
+    request(`/fixtures/${fixtureId}/legs/${legNumber}/frames`, {
+      method: 'POST',
+      body: JSON.stringify({ winnerPlayerId }),
+    }),
+  undoLastLegFrame: (fixtureId, legNumber) =>
+    request(`/fixtures/${fixtureId}/legs/${legNumber}/frames/last`, { method: 'DELETE' }),
+
+  getPlayerProfile: (playerId) => request(`/players/${playerId}`),
 };
