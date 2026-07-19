@@ -4,4 +4,3 @@ server/src/data/db.json
 *.log
 .DS_Store
 *.timestamp-*.mjs
-package-lock.json
