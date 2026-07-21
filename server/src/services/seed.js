@@ -1,7 +1,12 @@
 // Seeds "Top Spin Singles": 6 divisions (Premier, Division 1-5), singles,
-// race-to-6, single round-robin. Premier is populated with 8 demo players
-// and fixtures generated, with a few frame results recorded, so a reviewer
-// can see standings/scoring working end-to-end without doing manual setup.
+// race-to-6, single round-robin - populated with the real current-season
+// rosters (84 players total, 14 per division) so there's a realistic dataset
+// to test against. Every division gets its full round-robin fixture list
+// generated up front, but every fixture is left `scheduled` (unplayed) - the
+// rosters here are real, but there's no way to reconstruct the actual
+// match-by-match history (who played whom, in what order) from a final
+// standings table alone, so no results are invented. Score fixtures through
+// the normal app flow to build up real standings for testing.
 import { v4 as uuid } from 'uuid';
 import { resetDb, readDb, writeDb } from '../db.js';
 import { generateRoundRobin } from './roundRobin.js';
@@ -66,6 +71,51 @@ const league = {
 };
 db.leagues.push(league);
 
+// Real current-season rosters, one array per division - pulled from the
+// current standings tables (Prem/Div1-5) rather than invented demo names.
+// These are seed/demo `Player` records only, not linked to a registered
+// `User` account (same exception the old demo data relied on - see the
+// README's "Seeded demo data" section) purely so the divisions have full
+// rosters to test against out of the box.
+const rosters = {
+  'Premier League': [
+    'Suraj Singh Rathor', 'Neil Cummins', 'Simon Hendry', 'Josh Barnes',
+    'Daniel Hemphill', 'Tony Brine', 'Adrian Sturgess', 'Ryan Watts',
+    'Dan Shaw', 'Parvan Singh', 'Tinks Singh', 'Matthew Burgess',
+    'Joe Mckeown', 'John Guttridge',
+  ],
+  'Division 1': [
+    'Atul Modha', 'Dean Hutson', 'Ronnie Digwa', 'David Hampson',
+    'Richard Maiden', 'Luke Baker', 'Bobby Nijar', 'Ricky Goodwin',
+    'Michael Halton', 'Lewis Seagrave', 'David Spring', 'Daniel Richardson',
+    'Henry Morris', 'Phil West',
+  ],
+  'Division 2': [
+    'James Wood', 'Rhys Ho', 'Dale Baker', 'Aaron Roberts',
+    'Martin Sinclair', 'Simon McDougall', 'Owen Herridge', 'Jason Plant',
+    'Martyn Furey-Dear', 'Johnnie Digwa', 'Daniel Baird', 'Brandon Caine',
+    'Matthew Kennett', 'Mark Trusler',
+  ],
+  'Division 3': [
+    'Karol Zboch', 'Paul Nicholas', 'Christopher Brackstone', 'Sean Nicholas',
+    'Carl Gregory', 'Lloyd Treadgold', 'Ben Rankin', 'Liam Hodder',
+    'Joe Proctor', 'Luke Northover', 'Jordan Bassett', 'Nick Warren',
+    'Dotty Murphy', 'Justin Ware',
+  ],
+  'Division 4': [
+    'Matthew Lindsay', 'Oscar Carson', 'Paul Dunne', 'Max Vince',
+    'Michael Fonda', 'Martyn Bond', 'Gary Price', 'Gurdev Rathor',
+    'Marcus Smith', 'Adam Parnell', 'Stu Bridle', 'Ray Spong',
+    'Matty Stride', 'Doz Bernstein',
+  ],
+  'Division 5': [
+    'Jamie Pickersgill', 'Peter Carson', 'Brian Eley', 'Graham Uzell',
+    'Graham Davies', 'Wes Pack', 'Ally Modha', 'Ethan Parnell',
+    'Lee Walshe', 'Matt Bailey', 'Louie English', 'Mich Mich',
+    'Lia Hall', 'Jamie Fitzpatrick',
+  ],
+};
+
 const divisionNames = ['Premier League', 'Division 1', 'Division 2', 'Division 3', 'Division 4', 'Division 5'];
 const divisions = divisionNames.map((name, order) => ({
   id: uuid(),
@@ -81,74 +131,48 @@ const divisions = divisionNames.map((name, order) => ({
 }));
 db.divisions.push(...divisions);
 
-// Demo players for Premier League only.
-const premierPlayerNames = [
-  'Alex Turner', 'Sam Whitfield', 'Jordan Blake', 'Casey Morgan',
-  'Riley Stone', 'Taylor Reed', 'Morgan Price', 'Jamie Fox',
-];
-const premier = divisions[0];
-const premierPlayers = premierPlayerNames.map((name) => ({ id: uuid(), name }));
-db.players.push(...premierPlayers);
-premier.playerIds = premierPlayers.map((p) => p.id);
-premier.fixturesGenerated = true;
+// Build each division's roster, then generate its full round-robin fixture
+// list - every fixture starts `scheduled` (no frames recorded), so standings
+// start blank and get built up through the normal scoring flow, same as a
+// real season in progress.
+divisions.forEach((division) => {
+  const names = rosters[division.name] || [];
+  const players = names.map((name) => ({ id: uuid(), name }));
+  db.players.push(...players);
+  division.playerIds = players.map((p) => p.id);
+  division.fixturesGenerated = true;
 
-const rounds = generateRoundRobin(premier.playerIds);
-rounds.forEach((pairs, roundIndex) => {
-  pairs.forEach(([homePlayerId, awayPlayerId]) => {
-    db.fixtures.push({
-      id: uuid(),
-      leagueId: league.id,
-      divisionId: premier.id,
-      round: roundIndex + 1,
-      homePlayerId,
-      awayPlayerId,
-      raceTo: league.format.raceTo,
-      frames: [],
-      homeFrameScore: 0,
-      awayFrameScore: 0,
-      status: 'scheduled',
-      winnerPlayerId: null,
-      nextFixtureId: null,
-      nextFixtureSlot: null,
+  const rounds = generateRoundRobin(division.playerIds);
+  rounds.forEach((pairs, roundIndex) => {
+    pairs.forEach(([homePlayerId, awayPlayerId]) => {
+      db.fixtures.push({
+        id: uuid(),
+        leagueId: league.id,
+        divisionId: division.id,
+        round: roundIndex + 1,
+        scheduledDate: null,
+        homePlayerId,
+        awayPlayerId,
+        raceTo: league.format.raceTo,
+        frames: [],
+        homeFrameScore: 0,
+        awayFrameScore: 0,
+        status: 'scheduled',
+        winnerPlayerId: null,
+        nextFixtureId: null,
+        nextFixtureSlot: null,
+      });
     });
   });
-});
-
-// Play out round 1 as a demo, with varied scorelines (6-5, 6-0, 6-3, 6-4).
-const demoScores = [
-  [6, 5],
-  [6, 0],
-  [6, 3],
-  [6, 4],
-];
-const round1Fixtures = db.fixtures.filter((f) => f.divisionId === premier.id && f.round === 1);
-round1Fixtures.forEach((fixture, i) => {
-  const [homeFrames, awayFrames] = demoScores[i % demoScores.length];
-  const frames = [];
-  let h = 0;
-  let a = 0;
-  while (h < homeFrames || a < awayFrames) {
-    // Interleave frame wins roughly in proportion, finishing exactly at the target score.
-    if (h < homeFrames && (a >= awayFrames || (h + a) % 2 === 0)) {
-      frames.push({ frameNumber: frames.length + 1, winnerPlayerId: fixture.homePlayerId });
-      h++;
-    } else {
-      frames.push({ frameNumber: frames.length + 1, winnerPlayerId: fixture.awayPlayerId });
-      a++;
-    }
-  }
-  fixture.frames = frames;
-  fixture.homeFrameScore = homeFrames;
-  fixture.awayFrameScore = awayFrames;
-  fixture.status = 'completed';
-  fixture.winnerPlayerId = homeFrames > awayFrames ? fixture.homePlayerId : fixture.awayPlayerId;
 });
 
 writeDb(db);
 
 console.log('Seeded "Top Spin Singles" league:');
 console.log(`  League ID: ${league.id}`);
-divisions.forEach((d) => console.log(`  - ${d.name} (${d.id})`));
-console.log(`Premier League has ${premierPlayers.length} demo players, fixtures generated, round 1 results recorded.`);
+divisions.forEach((d) => {
+  const fixtureCount = db.fixtures.filter((f) => f.divisionId === d.id).length;
+  console.log(`  - ${d.name} (${d.id}): ${d.playerIds.length} players, ${fixtureCount} fixtures generated (all unplayed)`);
+});
 console.log(`Seeded ${seedVenueNames.length} approved venues: ${seedVenueNames.join(', ')}`);
 console.log(`Seeded admin account: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD} (change this before deploying anywhere real people can reach it)`);
