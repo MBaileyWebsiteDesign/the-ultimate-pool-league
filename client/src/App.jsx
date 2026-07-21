@@ -7,8 +7,15 @@ import PlayerProfile from './pages/PlayerProfile.jsx';
 import Login from './pages/Login.jsx';
 import Register from './pages/Register.jsx';
 import PlayerLogin from './pages/PlayerLogin.jsx';
+import Account from './pages/Account.jsx';
+import AdminUsers from './pages/AdminUsers.jsx';
+import AdminUserEdit from './pages/AdminUserEdit.jsx';
+import AdminAuditLog from './pages/AdminAuditLog.jsx';
 import { AuthProvider, useAuth } from './AuthContext.jsx';
 import { PlayerAuthProvider, usePlayerAuth } from './PlayerAuthContext.jsx';
+import { BreadcrumbProvider } from './BreadcrumbContext.jsx';
+import Breadcrumbs from './components/Breadcrumbs.jsx';
+import { useIsAdminSession } from './useAdminSession.js';
 
 // Gates the standard "view the site" pages: being logged in as EITHER an
 // admin or a registered player is enough. Anonymous visitors are bounced to
@@ -19,6 +26,32 @@ function RequireLogin({ children }) {
   const location = useLocation();
 
   if (!isAdmin && !isPlayerLoggedIn) {
+    return <Navigate to="/account/login" state={{ from: location }} replace />;
+  }
+  return children;
+}
+
+// Gates the "My Account" page: only registered player accounts have a
+// db.users record to edit - the hardcoded super-admin has nothing to manage
+// here (they'd want /admin/users instead).
+function RequirePlayerAccount({ children }) {
+  const { isPlayerLoggedIn } = usePlayerAuth();
+  const location = useLocation();
+
+  if (!isPlayerLoggedIn) {
+    return <Navigate to="/account/login" state={{ from: location }} replace />;
+  }
+  return children;
+}
+
+// Gates the /admin/* user-management pages: either the hardcoded super-admin
+// or a player account promoted to role: 'admin' - mirrors the server's
+// requireAdminRole check.
+function RequireAdminSession({ children }) {
+  const isAdminSession = useIsAdminSession();
+  const location = useLocation();
+
+  if (!isAdminSession) {
     return <Navigate to="/account/login" state={{ from: location }} replace />;
   }
   return children;
@@ -66,7 +99,7 @@ function PlayerHeaderControl() {
 
   return (
     <span className="header-admin">
-      <span className="admin-badge">{player?.firstName || 'Player'}</span>
+      <Link to="/account" className="admin-badge">{player?.firstName || 'Player'}</Link>
       <button
         className="header-link header-link-button"
         onClick={() => {
@@ -80,6 +113,16 @@ function PlayerHeaderControl() {
   );
 }
 
+function AdminUsersNavLink() {
+  const isAdminSession = useIsAdminSession();
+  if (!isAdminSession) return null;
+  return (
+    <Link to="/admin/users" className="header-link">
+      Manage Users
+    </Link>
+  );
+}
+
 function AppShell() {
   return (
     <div className="app-shell">
@@ -88,16 +131,22 @@ function AppShell() {
           🎱 The Ultimate Pool League
         </Link>
         <span className="header-accounts">
+          <AdminUsersNavLink />
           <PlayerHeaderControl />
           <AdminHeaderControl />
         </span>
       </header>
+      <Breadcrumbs />
       <main className="app-main">
         <Routes>
           <Route path="/" element={<RequireLogin><LeagueList /></RequireLogin>} />
           <Route path="/login" element={<Login />} />
           <Route path="/account/login" element={<PlayerLogin />} />
           <Route path="/account/register" element={<Register />} />
+          <Route path="/account" element={<RequirePlayerAccount><Account /></RequirePlayerAccount>} />
+          <Route path="/admin/users" element={<RequireAdminSession><AdminUsers /></RequireAdminSession>} />
+          <Route path="/admin/users/:userId" element={<RequireAdminSession><AdminUserEdit /></RequireAdminSession>} />
+          <Route path="/admin/audit-log" element={<RequireAdminSession><AdminAuditLog /></RequireAdminSession>} />
           <Route path="/leagues/:leagueId" element={<RequireLogin><LeagueDetail /></RequireLogin>} />
           <Route path="/divisions/:divisionId" element={<RequireLogin><DivisionDetail /></RequireLogin>} />
           <Route path="/fixtures/:fixtureId" element={<RequireLogin><FixtureDetail /></RequireLogin>} />
@@ -112,7 +161,9 @@ export default function App() {
   return (
     <AuthProvider>
       <PlayerAuthProvider>
-        <AppShell />
+        <BreadcrumbProvider>
+          <AppShell />
+        </BreadcrumbProvider>
       </PlayerAuthProvider>
     </AuthProvider>
   );

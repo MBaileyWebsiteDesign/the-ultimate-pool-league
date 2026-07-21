@@ -36,12 +36,24 @@ export function PlayerAuthProvider({ children }) {
     setSession(null);
   }, []);
 
+  // Refreshes the cached user object after a self-service profile edit or
+  // password change, without needing a brand new token.
+  const updateUser = useCallback((user) => {
+    setSession((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, user };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
   const value = {
     isPlayerLoggedIn: !!session,
     playerToken: session?.token || null,
     player: session?.user || null,
     login,
     logout,
+    updateUser,
   };
 
   return <PlayerAuthContext.Provider value={value}>{children}</PlayerAuthContext.Provider>;

@@ -31,6 +31,23 @@ export const api = {
   loginPlayer: (email, password) =>
     request('/users/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   getMe: () => request('/users/me'),
+  updateMe: (data) => request('/users/me', { method: 'PATCH', body: JSON.stringify(data) }),
+  changePassword: (currentPassword, newPassword) =>
+    request('/users/me/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
+
+  // Admin: user management
+  adminListUsers: (q = '') => request(`/admin/users${q ? `?q=${encodeURIComponent(q)}` : ''}`),
+  adminGetUser: (id) => request(`/admin/users/${id}`),
+  adminUpdateUser: (id, data) => request(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  adminSetRole: (id, role) => request(`/admin/users/${id}/role`, { method: 'POST', body: JSON.stringify({ role }) }),
+  adminSetStatus: (id, status) => request(`/admin/users/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
+  adminResetPassword: (id, newPassword) =>
+    request(`/admin/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({ newPassword }) }),
+  adminGetAuditLog: () => request('/admin/audit-log'),
+
+  // Admin: score override
+  overrideFixture: (fixtureId, homeScore, awayScore) =>
+    request(`/fixtures/${fixtureId}/override`, { method: 'POST', body: JSON.stringify({ homeScore, awayScore }) }),
 
   getLeagues: () => request('/leagues'),
   createLeague: (data) => request('/leagues', { method: 'POST', body: JSON.stringify(data) }),

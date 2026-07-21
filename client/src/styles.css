@@ -70,6 +70,27 @@ body {
   border-radius: 999px;
 }
 
+.breadcrumb-bar {
+  background: white;
+  border-bottom: 1px solid var(--border);
+  padding: 10px 24px;
+  font-size: 0.85rem;
+}
+
+.breadcrumb-item a {
+  color: var(--green);
+  text-decoration: none;
+}
+
+.breadcrumb-item a:hover { text-decoration: underline; }
+
+.breadcrumb-sep {
+  color: var(--muted);
+  margin: 0 8px;
+}
+
+.breadcrumb-current { color: var(--muted); }
+
 .app-main {
   max-width: 960px;
   margin: 0 auto;
