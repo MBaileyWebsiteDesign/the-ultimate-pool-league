@@ -1,12 +1,10 @@
 import { useAuth } from './AuthContext.jsx';
-import { usePlayerAuth } from './PlayerAuthContext.jsx';
 
-// True for either the hardcoded super-admin session or a player account
-// that's been promoted to role: 'admin' - mirrors the server's
-// requireAdminRole check (see server/src/userAuth.js), so the UI only shows
-// admin-only controls to sessions that the API will actually let through.
+// Thin re-export so existing call sites (and any future ones) read clearly
+// as "does this session get admin-only UI" without reaching into useAuth()
+// directly. Kept as its own hook mostly for history - now that there's a
+// single account model, this is just `isAdmin`.
 export function useIsAdminSession() {
   const { isAdmin } = useAuth();
-  const { player } = usePlayerAuth();
-  return isAdmin || player?.role === 'admin';
+  return isAdmin;
 }

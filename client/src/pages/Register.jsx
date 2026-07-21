@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
-import { usePlayerAuth } from '../PlayerAuthContext.jsx';
+import { useAuth } from '../AuthContext.jsx';
 import VenueSelect from '../components/VenueSelect.jsx';
 
 const CLASSIFICATIONS = ['A', 'B', 'C', 'D'];
 
 export default function Register() {
-  const { login } = usePlayerAuth();
+  const { login } = useAuth();
   const navigate = useNavigate();
   const [form, setForm] = useState({
     firstName: '', lastName: '', email: '', password: '',
@@ -23,7 +23,7 @@ export default function Register() {
     setError('');
     setSubmitting(true);
     try {
-      const { token, expiresAt, user } = await api.registerPlayer({
+      const { token, expiresAt, user } = await api.register({
         ...form,
         classification: form.classification || null,
       });
@@ -41,7 +41,7 @@ export default function Register() {
       <h1>Create Your Account</h1>
       <p className="muted">
         Register to browse leagues, divisions, fixtures and player profiles. Already have
-        an account? <Link to="/account/login">Sign in</Link>.
+        an account? <Link to="/login">Sign in</Link>.
       </p>
       <form className="card form" onSubmit={onSubmit}>
         <label>

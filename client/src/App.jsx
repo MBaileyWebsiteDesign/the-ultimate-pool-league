@@ -6,128 +6,93 @@ import FixtureDetail from './pages/FixtureDetail.jsx';
 import PlayerProfile from './pages/PlayerProfile.jsx';
 import Login from './pages/Login.jsx';
 import Register from './pages/Register.jsx';
-import PlayerLogin from './pages/PlayerLogin.jsx';
-import Account from './pages/Account.jsx';
+import PlayerPortal from './pages/PlayerPortal.jsx';
+import CaptainPortal from './pages/CaptainPortal.jsx';
+import AdminPortal from './pages/AdminPortal.jsx';
 import AdminUsers from './pages/AdminUsers.jsx';
 import AdminUserEdit from './pages/AdminUserEdit.jsx';
 import AdminAuditLog from './pages/AdminAuditLog.jsx';
 import AdminVenues from './pages/AdminVenues.jsx';
+import AdminSeasonWizard from './pages/AdminSeasonWizard.jsx';
 import { AuthProvider, useAuth } from './AuthContext.jsx';
-import { PlayerAuthProvider, usePlayerAuth } from './PlayerAuthContext.jsx';
 import { BreadcrumbProvider } from './BreadcrumbContext.jsx';
 import Breadcrumbs from './components/Breadcrumbs.jsx';
-import { useIsAdminSession } from './useAdminSession.js';
-import { reconcileSessions } from './sessionBus.js';
 
-// Runs once when this module loads, before AuthProvider/PlayerAuthProvider
-// read their initial state - cleans up the (now-disallowed) case where both
-// an admin and a player session were stored from before sessions became
-// mutually exclusive.
-reconcileSessions();
-
-// Gates the standard "view the site" pages: being logged in as EITHER an
-// admin or a registered player is enough. Anonymous visitors are bounced to
-// the player login page (registration is one click away from there).
+// Gates the standard "view the site" pages: any logged-in account (whatever
+// combination of admin/captain/plain-player flags it has) can browse. There
+// used to be two separate login flows (admin, player) each with their own
+// gate - now there's one account model, so one gate.
 function RequireLogin({ children }) {
+  const { isLoggedIn } = useAuth();
+  const location = useLocation();
+
+  if (!isLoggedIn) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+  return children;
+}
+
+function RequireAdmin({ children }) {
   const { isAdmin } = useAuth();
-  const { isPlayerLoggedIn } = usePlayerAuth();
   const location = useLocation();
-
-  if (!isAdmin && !isPlayerLoggedIn) {
-    return <Navigate to="/account/login" state={{ from: location }} replace />;
-  }
-  return children;
-}
-
-// Gates the "My Account" page: only registered player accounts have a
-// db.users record to edit - the hardcoded super-admin has nothing to manage
-// here (they'd want /admin/users instead).
-function RequirePlayerAccount({ children }) {
-  const { isPlayerLoggedIn } = usePlayerAuth();
-  const location = useLocation();
-
-  if (!isPlayerLoggedIn) {
-    return <Navigate to="/account/login" state={{ from: location }} replace />;
-  }
-  return children;
-}
-
-// Gates the /admin/* user-management pages: either the hardcoded super-admin
-// or a player account promoted to role: 'admin' - mirrors the server's
-// requireAdminRole check.
-function RequireAdminSession({ children }) {
-  const isAdminSession = useIsAdminSession();
-  const location = useLocation();
-
-  if (!isAdminSession) {
-    return <Navigate to="/account/login" state={{ from: location }} replace />;
-  }
-  return children;
-}
-
-function AdminHeaderControl() {
-  const { isAdmin, logout } = useAuth();
-  const navigate = useNavigate();
 
   if (!isAdmin) {
-    return (
-      <Link to="/login" className="header-link">
-        Admin Login
-      </Link>
-    );
+    return <Navigate to="/login" state={{ from: location }} replace />;
   }
-
-  return (
-    <span className="header-admin">
-      <span className="admin-badge">Admin</span>
-      <button
-        className="header-link header-link-button"
-        onClick={() => {
-          logout();
-          navigate('/');
-        }}
-      >
-        Log out
-      </button>
-    </span>
-  );
+  return children;
 }
 
-function PlayerHeaderControl() {
-  const { isPlayerLoggedIn, player, logout } = usePlayerAuth();
+function RequireCaptain({ children }) {
+  const { isCaptain, isAdmin } = useAuth();
+  const location = useLocation();
+
+  // Admins can also see the Captain Portal (useful while the captain flag is
+  // still singles-only and not many accounts have it set yet).
+  if (!isCaptain && !isAdmin) {
+    return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+  return children;
+}
+
+function HeaderNav() {
+  const { isLoggedIn, isAdmin, isCaptain, user, logout } = useAuth();
   const navigate = useNavigate();
 
-  if (!isPlayerLoggedIn) {
+  if (!isLoggedIn) {
     return (
-      <Link to="/account/login" className="header-link">
+      <Link to="/login" className="header-link">
         Login
       </Link>
     );
   }
 
   return (
-    <span className="header-admin">
-      <Link to="/account" className="admin-badge">{player?.firstName || 'Player'}</Link>
-      <button
-        className="header-link header-link-button"
-        onClick={() => {
-          logout();
-          navigate('/account/login');
-        }}
-      >
-        Log out
-      </button>
+    <span className="header-accounts">
+      {isAdmin && (
+        <Link to="/admin" className="header-link">
+          Admin Portal
+        </Link>
+      )}
+      {isCaptain && (
+        <Link to="/captain" className="header-link">
+          Captain Portal
+        </Link>
+      )}
+      <span className="header-admin">
+        <Link to="/account" className="admin-badge">
+          {user.firstName}{isAdmin ? ' · Admin' : ''}{isCaptain ? ' · Captain' : ''}
+        </Link>
+        <button
+          className="header-link header-link-button"
+          onClick={() => {
+            logout();
+            navigate('/login');
+          }}
+        >
+          Log out
+        </button>
+      </span>
     </span>
-  );
-}
-
-function AdminUsersNavLink() {
-  const isAdminSession = useIsAdminSession();
-  if (!isAdminSession) return null;
-  return (
-    <Link to="/admin/users" className="header-link">
-      Manage Users
-    </Link>
   );
 }
 
@@ -138,24 +103,22 @@ function AppShell() {
         <Link to="/" className="brand">
           🎱 The Ultimate Pool League
         </Link>
-        <span className="header-accounts">
-          <AdminUsersNavLink />
-          <PlayerHeaderControl />
-          <AdminHeaderControl />
-        </span>
+        <HeaderNav />
       </header>
       <Breadcrumbs />
       <main className="app-main">
         <Routes>
           <Route path="/" element={<RequireLogin><LeagueList /></RequireLogin>} />
           <Route path="/login" element={<Login />} />
-          <Route path="/account/login" element={<PlayerLogin />} />
-          <Route path="/account/register" element={<Register />} />
-          <Route path="/account" element={<RequirePlayerAccount><Account /></RequirePlayerAccount>} />
-          <Route path="/admin/users" element={<RequireAdminSession><AdminUsers /></RequireAdminSession>} />
-          <Route path="/admin/users/:userId" element={<RequireAdminSession><AdminUserEdit /></RequireAdminSession>} />
-          <Route path="/admin/audit-log" element={<RequireAdminSession><AdminAuditLog /></RequireAdminSession>} />
-          <Route path="/admin/venues" element={<RequireAdminSession><AdminVenues /></RequireAdminSession>} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/account" element={<RequireLogin><PlayerPortal /></RequireLogin>} />
+          <Route path="/captain" element={<RequireCaptain><CaptainPortal /></RequireCaptain>} />
+          <Route path="/admin" element={<RequireAdmin><AdminPortal /></RequireAdmin>} />
+          <Route path="/admin/users" element={<RequireAdmin><AdminUsers /></RequireAdmin>} />
+          <Route path="/admin/users/:userId" element={<RequireAdmin><AdminUserEdit /></RequireAdmin>} />
+          <Route path="/admin/audit-log" element={<RequireAdmin><AdminAuditLog /></RequireAdmin>} />
+          <Route path="/admin/venues" element={<RequireAdmin><AdminVenues /></RequireAdmin>} />
+          <Route path="/admin/seasons/new" element={<RequireAdmin><AdminSeasonWizard /></RequireAdmin>} />
           <Route path="/leagues/:leagueId" element={<RequireLogin><LeagueDetail /></RequireLogin>} />
           <Route path="/divisions/:divisionId" element={<RequireLogin><DivisionDetail /></RequireLogin>} />
           <Route path="/fixtures/:fixtureId" element={<RequireLogin><FixtureDetail /></RequireLogin>} />
@@ -169,11 +132,9 @@ function AppShell() {
 export default function App() {
   return (
     <AuthProvider>
-      <PlayerAuthProvider>
-        <BreadcrumbProvider>
-          <AppShell />
-        </BreadcrumbProvider>
-      </PlayerAuthProvider>
+      <BreadcrumbProvider>
+        <AppShell />
+      </BreadcrumbProvider>
     </AuthProvider>
   );
 }

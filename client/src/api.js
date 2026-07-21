@@ -1,12 +1,9 @@
 import { getStoredToken } from './AuthContext.jsx';
-import { getStoredPlayerToken } from './PlayerAuthContext.jsx';
 
 const BASE = '/api';
 
 async function request(path, options = {}) {
-  // Admin and player sessions are mutually exclusive (see sessionBus.js), so
-  // at most one of these two is ever set - this just reads whichever exists.
-  const token = getStoredToken() || getStoredPlayerToken();
+  const token = getStoredToken();
   const res = await fetch(`${BASE}${path}`, {
     headers: {
       'Content-Type': 'application/json',
@@ -22,24 +19,24 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  login: (username, password) =>
-    request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
-
-  // Player/member accounts
-  registerPlayer: (data) =>
+  // Single unified login for every account (admin, player, captain - any
+  // combination of flags on the same account).
+  login: (email, password) =>
+    request('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  register: (data) =>
     request('/users/register', { method: 'POST', body: JSON.stringify(data) }),
-  loginPlayer: (email, password) =>
-    request('/users/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   getMe: () => request('/users/me'),
   updateMe: (data) => request('/users/me', { method: 'PATCH', body: JSON.stringify(data) }),
   changePassword: (currentPassword, newPassword) =>
     request('/users/me/change-password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
+  getMyFixtures: () => request('/users/me/fixtures'),
 
   // Admin: user management
   adminListUsers: (q = '') => request(`/admin/users${q ? `?q=${encodeURIComponent(q)}` : ''}`),
   adminGetUser: (id) => request(`/admin/users/${id}`),
   adminUpdateUser: (id, data) => request(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-  adminSetRole: (id, role) => request(`/admin/users/${id}/role`, { method: 'POST', body: JSON.stringify({ role }) }),
+  adminSetPermissions: (id, permissions) =>
+    request(`/admin/users/${id}/permissions`, { method: 'POST', body: JSON.stringify(permissions) }),
   adminSetStatus: (id, status) => request(`/admin/users/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
   adminResetPassword: (id, newPassword) =>
     request(`/admin/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({ newPassword }) }),
@@ -50,6 +47,13 @@ export const api = {
   adminListVenues: () => request('/admin/venues'),
   adminApproveVenue: (id) => request(`/admin/venues/${id}/approve`, { method: 'POST' }),
   adminRejectVenue: (id) => request(`/admin/venues/${id}/reject`, { method: 'POST' }),
+
+  // Admin: season setup wizard
+  adminCreateSeason: (data) => request('/admin/seasons', { method: 'POST', body: JSON.stringify(data) }),
+  adminImportSeasonPlayers: (leagueId, rows) =>
+    request(`/admin/seasons/${leagueId}/import-players`, { method: 'POST', body: JSON.stringify({ rows }) }),
+  adminGenerateSeason: (leagueId, data) =>
+    request(`/admin/seasons/${leagueId}/generate`, { method: 'POST', body: JSON.stringify(data) }),
 
   // Admin: score override
   overrideFixture: (fixtureId, homeScore, awayScore) =>
@@ -67,8 +71,8 @@ export const api = {
     request(`/divisions/${divisionId}/players`, { method: 'POST', body: JSON.stringify({ playerId }) }),
   removePlayer: (divisionId, playerId) =>
     request(`/divisions/${divisionId}/players/${playerId}`, { method: 'DELETE' }),
-  generateFixtures: (divisionId) =>
-    request(`/divisions/${divisionId}/generate-fixtures`, { method: 'POST' }),
+  generateFixtures: (divisionId, data = {}) =>
+    request(`/divisions/${divisionId}/generate-fixtures`, { method: 'POST', body: JSON.stringify(data) }),
 
   getFixture: (id) => request(`/fixtures/${id}`),
   recordFrame: (fixtureId, winnerPlayerId) =>

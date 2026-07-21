@@ -1,12 +1,16 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { useAuth } from '../AuthContext.jsx';
 
+// One login for everyone - admins, players and captains all sign in here
+// with the same email/password form. What you can see and do afterwards
+// depends on the flags on your account (isAdmin, isCaptain), not on which
+// login page you used.
 export default function Login() {
   const { login } = useAuth();
   const navigate = useNavigate();
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -16,8 +20,8 @@ export default function Login() {
     setError('');
     setSubmitting(true);
     try {
-      const { token, expiresAt } = await api.login(username, password);
-      login(token, expiresAt);
+      const { token, expiresAt, user } = await api.login(email, password);
+      login(token, expiresAt, user);
       navigate('/');
     } catch (err) {
       setError(err.message);
@@ -28,18 +32,15 @@ export default function Login() {
 
   return (
     <div style={{ maxWidth: 360, margin: '40px auto' }}>
-      <h1>Admin Login</h1>
+      <h1>Log In</h1>
       <p className="muted">
-        Sign in to create leagues and divisions. Everyone else can browse leagues,
-        register players, generate fixtures and score matches without logging in.
-      </p>
-      <p className="muted">
-        Note: signing in here will log you out of any player account session in this browser.
+        Sign in to browse leagues, divisions, fixtures and player profiles. No account
+        yet? <Link to="/register">Create one</Link>.
       </p>
       <form className="card form" onSubmit={onSubmit}>
         <label>
-          Username
-          <input value={username} onChange={(e) => setUsername(e.target.value)} required autoFocus />
+          Email
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoFocus />
         </label>
         <label>
           Password
