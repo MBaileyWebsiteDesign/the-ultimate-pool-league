@@ -36,9 +36,10 @@ system for.
   next round, that frame/leg can't be undone from the completed fixture (it would
   silently corrupt the bracket) — the fixture detail page shows "TBD" for slots that
   haven't been decided yet.
-- **Player registration** per division (singles) or per team (teams). Rosters lock once
-  fixtures are generated, which mirrors how real leagues avoid re-shuffling a season
-  that's already started.
+- **Player registration** per division (singles) or per team (teams), picked from the
+  list of people who've actually created an account (see **Player accounts** below) -
+  rosters can't be padded with made-up names. Rosters lock once fixtures are generated,
+  which mirrors how real leagues avoid re-shuffling a season that's already started.
 - **Automatic fixture generation**: circle-method round-robin (handling odd counts via
   a bye) or knockout bracket generation, depending on the division's `scheduling`.
 - **Frame-by-frame scoring**: each frame is recorded as a single winner; the match ends
@@ -81,6 +82,11 @@ system for.
 - **Audit log**: every admin action that changes something on someone else's behalf
   (score overrides, profile edits, role/status changes, forced password resets) is
   recorded with who did it and when, visible to admins from the user management screen.
+- **Venues**: a curated, admin-approved list of venues (seeded with a starter set). New
+  venue names typed at registration or in a profile edit are automatically queued for
+  approval rather than requiring a separate step - see **Venues** below.
+- **Single active session per browser**: logging in as admin logs you out of any player
+  session in that browser, and vice versa - you can never be both at once.
 
 ## What's deliberately out of scope for v1
 
@@ -120,11 +126,14 @@ this is what's required to browse the site as a normal visitor. Registration col
 Passwords are salted and hashed with Node's built-in `crypto.scrypt` (never stored in
 plaintext, and stronger than the SHA-256 minimum this was built to), and login issues the
 same style of HMAC-signed, 24-hour token as the admin account, stored in `localStorage`
-separately from the admin session so a browser can be logged into both an admin session
-and a player session at once - the header shows both controls side by side. Player
-accounts live in the same JSON database as everything else (`db.users`), not a separate
-store. Every registered account is auto-linked (by matching name) to a `Player` roster
-entry where one exists, powering the "view my stats" link on the account page.
+under its own key, separate from the admin session. Admin and player sessions are
+**mutually exclusive**, though: logging into one immediately logs the other out in that
+browser (see `client/src/sessionBus.js`), so you can never be signed in as both at once.
+Player accounts live in the same JSON database as everything else (`db.users`), not a
+separate store. Every registered account is auto-linked (by matching name) to a `Player`
+roster entry where one exists, powering the "view my stats" link on the account page and
+letting captains/admins add them to a division or team roster (see **What's implemented**
+above - only registered accounts can be added as players).
 
 Logged-in players can manage their own account from "My Account" (click their name, top
 right): update any profile field, or change their password (current password required).
@@ -148,6 +157,20 @@ admin can:
 
 Admins also get a score-override control on every fixture's detail page, for correcting
 a result directly without replaying it frame-by-frame.
+
+## Venues
+
+Every player's "home venue" is chosen from a shared, admin-approved list rather than free
+text, so it stays tidy across the whole league instead of accumulating typo'd duplicates.
+The list is seeded with five starter venues (see `server/src/services/seed.js`).
+
+If a player's venue isn't on the list yet - at registration, or later editing their
+profile from "My Account" - they just type it in; there's no separate "request" form to
+fill out. That name is saved as their own venue immediately, and a matching entry is
+automatically queued as `pending` in the venues table behind the scenes. It won't show up
+in the shared dropdown for anyone else until an admin approves it from "Manage Venues"
+(next to "Manage Users" in the admin header), where pending requests show who asked for
+each one and can be approved or rejected with one click.
 
 ## Architecture
 
@@ -174,11 +197,13 @@ pool-league/
     src/
       pages/                LeagueList, LeagueDetail, DivisionDetail, FixtureDetail,
                             PlayerProfile, Login, Register, PlayerLogin, Account,
-                            AdminUsers, AdminUserEdit, AdminAuditLog
+                            AdminUsers, AdminUserEdit, AdminAuditLog, AdminVenues
       components/
         Breadcrumbs.jsx      Renders the shared breadcrumb trail
+        VenueSelect.jsx      Venue dropdown + "not listed" free-text fallback
       AuthContext.jsx       Admin session state (token storage, login/logout)
       PlayerAuthContext.jsx Player session state, kept separate from admin
+      sessionBus.js          Enforces admin/player sessions are mutually exclusive
       BreadcrumbContext.jsx Shared breadcrumb trail + useSetBreadcrumbs(...) hook
       useAdminSession.js     True for either an admin session or a promoted-admin player
       api.js                Fetch wrapper for the REST API
@@ -224,6 +249,11 @@ script, not a rewrite. This is the top item in the roadmap.
 - `AuditLog` entry: `id, at, actor, action, targetType, targetId, details` — one entry
   per admin action that affects another account or a fixture result; capped at the most
   recent 500 entries.
+- `Venue`: `id, name, status ('pending'|'approved'|'rejected'), requestedBy (User id or
+  null), requestedByName, requestedAt, approvedBy, approvedAt`. `requestedBy` is `null`
+  for the seeded starter venues; everything else is auto-created the first time someone's
+  `venue` field is set to a name that isn't already in the table (see `ensureVenue` in
+  `server/src/index.js`).
 
 ## Running it locally
 
@@ -252,6 +282,16 @@ For frontend development with hot reload instead of a static build, run `npm run
 in `client/` (http://localhost:5173) instead of `npm run build`; the Vite dev server
 proxies `/api` requests to the Express server on port 4000, so run both at once.
 
+## Deployment note: this cannot be hosted on GitHub Pages
+
+GitHub Pages only serves static files - it has no way to run the Express API server or
+persist the JSON database. This repo has Pages enabled at the repository level, but that
+setting has nothing published to it; visiting the Pages URL for this repo will not show a
+working app. To actually put this live, it needs a host that can run a Node.js process
+(Render, Railway, Fly.io, a VPS, etc.) - point that host at `server/` (after `npm run
+build` in `client/` so `client/dist` exists for it to serve) rather than trying to
+publish through Pages.
+
 ## API reference (summary)
 
 | Method | Path | Purpose |
@@ -274,9 +314,10 @@ proxies `/api` requests to the Express server on port 4000, so run both at once.
 | GET | `/api/leagues/:id` | League + its divisions (requires login) |
 | POST | `/api/leagues/:leagueId/divisions` | Add a division (requires admin; accepts `entryType`, `scheduling`, `legsPerMatch`) |
 | GET | `/api/divisions/:id` | Division + players/teams, fixtures, standings (requires login) |
-| POST/DELETE | `/api/divisions/:id/players` | Register / remove a player (singles, pre-fixtures only) |
+| GET | `/api/registered-players` | List of players linked to a registered, active user account (requires login) - the pool a roster picks from |
+| POST/DELETE | `/api/divisions/:id/players` | Register / remove a player by `playerId` (singles, pre-fixtures only; `playerId` must belong to a registered, active user) |
 | POST/DELETE | `/api/divisions/:id/teams` | Add / remove a team (teams, pre-fixtures only) |
-| POST/DELETE | `/api/teams/:teamId/players` | Add / remove a player on a team roster |
+| POST/DELETE | `/api/teams/:teamId/players` | Add / remove a player by `playerId` on a team roster (same registered-user requirement) |
 | POST | `/api/divisions/:id/generate-fixtures` | Generate the fixture list (round robin or knockout bracket, per the division's `scheduling`) |
 | GET | `/api/fixtures/:id` | Fixture detail (requires login; singles or team, includes `bothEntrantsKnown` for knockout TBD slots) |
 | POST | `/api/fixtures/:id/frames` | Record a frame winner (singles) |
@@ -285,12 +326,17 @@ proxies `/api` requests to the Express server on port 4000, so run both at once.
 | POST | `/api/fixtures/:id/legs/:legNumber/frames` | Record a frame winner within a leg |
 | DELETE | `/api/fixtures/:id/legs/:legNumber/frames/last` | Undo the last frame within a leg |
 | GET | `/api/players/:id` | Player profile: career record, head-to-head, match history (requires login) |
+| GET | `/api/venues` | Approved venues, plus the logged-in user's own pending/rejected requests if any (no login required, so registration can use it) |
+| GET | `/api/admin/venues` | All venues, pending first (requires admin) |
+| POST | `/api/admin/venues/:id/approve` | Approve a pending venue (requires admin; logged) |
+| POST | `/api/admin/venues/:id/reject` | Reject a pending venue (requires admin; logged) |
 
 ## Roadmap
 
-1. Swap the JSON file store for Postgres, and add a proper `captain` role (registering
-   players/teams, generating fixtures and scoring matches are currently open to anyone
-   with the fixture/division URL rather than gated to a specific role).
+1. Swap the JSON file store for Postgres, and add a proper `captain` role (generating
+   fixtures and scoring matches are currently open to anyone with the fixture/division
+   URL rather than gated to a specific role - registering players onto a roster is at
+   least now restricted to registered accounts).
 2. Password reset via email and email verification at registration (currently a forgotten
    password requires an admin to force-reset it).
 3. Further scheduling methods: home/away double round robin, double elimination,
@@ -309,4 +355,11 @@ Running `npm run seed` creates the **Top Spin Singles** league with six division
 (Premier League, Division 1–5), populates Premier League with 8 demo players, generates
 its full round-robin fixture list, and plays out round 1 with varied race-to-6
 scorelines (6–5, 6–0, 6–3, 6–4) so the standings table and scoring flow are visible
-immediately without any manual setup.
+immediately without any manual setup. It also seeds 5 pre-approved venues (The Cue Club,
+Rack 'Em Sports Bar, The Green Baize, Corner Pocket Tavern, Break & Run Social Club) so
+the venue picker isn't empty on a fresh install.
+
+Note: the 8 demo Premier League players are seeded directly (not linked to a registered
+user account), purely to make the standings/scoring demo visible out of the box - they
+predate, and are an exception to, the "players must be registered users" rule described
+above, which only applies to rosters built going forward through the app itself.
