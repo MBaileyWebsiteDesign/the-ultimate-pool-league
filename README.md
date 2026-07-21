@@ -1,5 +1,7 @@
 # The Ultimate Pool League
 
+Live on GitHub: https://github.com/MBaileyWebsiteDesign/the-ultimate-pool-league
+
 A self-hosted pool league management platform: admins create leagues, divisions and
 players; the app schedules fixtures per division (round robin or knockout); captains or
 admins record match results frame-by-frame; standings update automatically. Built to
@@ -58,13 +60,32 @@ system for.
   generating fixtures, and scoring matches remain open to anyone with the fixture/division
   URL, since that's the day-to-day captain/scorer workflow and doesn't need its own login
   yet - see the roadmap for tightening this further.
+- **Breadcrumb navigation**: every page below the home list shows a trail back to the
+  home page (League › Division › Round N, etc.), rendered as a bar under the header.
+- **Account management** ("My Account"): any logged-in player can update all of their own
+  profile fields and change their password, plus a quick link to their own stats/history
+  if their account is linked to a `Player` roster entry.
+- **Role-aware accounts**: a player account can be promoted to `admin` by an existing
+  admin, in addition to the original hardcoded super-admin account — so a league can have
+  more than one admin without sharing a single login. Accounts can also be suspended
+  (blocks login immediately) and reactivated.
+- **Admin user management**: admins get a searchable list of every registered user,
+  clickable through to an edit screen where they can update any profile field, promote/
+  demote admin rights, suspend/reactivate the account, and force-set a new password
+  without knowing the old one.
+- **Admin score override**: admins can directly correct a fixture's final score at any
+  time, bypassing frame-by-frame play — useful for fixing a scoring mistake after the
+  fact. It's blocked only when changing the *winner* would silently corrupt a knockout
+  bracket that's already progressed past that result; pure score corrections (same
+  winner) are always allowed.
+- **Audit log**: every admin action that changes something on someone else's behalf
+  (score overrides, profile edits, role/status changes, forced password resets) is
+  recorded with who did it and when, visible to admins from the user management screen.
 
 ## What's deliberately out of scope for v1
 
 Handicaps, online entry/payment, tablet-specific UI, stream overlays and timers, table
-booking, double-elimination/mini-knockout/mixed formats, and role-aware accounts (a
-player account can view everything but has no captain/league-admin permissions of its
-own yet - see **Roadmap** below).
+booking, and double-elimination/mini-knockout/mixed formats.
 
 ## Admin login
 
@@ -97,13 +118,36 @@ this is what's required to browse the site as a normal visitor. Registration col
 - Classification, A through D (optional)
 
 Passwords are salted and hashed with Node's built-in `crypto.scrypt` (never stored in
-plaintext), and login issues the same style of HMAC-signed, 24-hour token as the admin
-account, stored in `localStorage` separately from the admin session so a browser can be
-logged into both an admin session and a player session at once - the header shows both
-controls side by side. Player accounts live in the same JSON database as everything else
-(`db.users`), not a separate store. See `server/src/userAuth.js` for the implementation,
-and the roadmap for what a production version needs on top of this (password reset,
-email verification, and real per-account permissions beyond "can view").
+plaintext, and stronger than the SHA-256 minimum this was built to), and login issues the
+same style of HMAC-signed, 24-hour token as the admin account, stored in `localStorage`
+separately from the admin session so a browser can be logged into both an admin session
+and a player session at once - the header shows both controls side by side. Player
+accounts live in the same JSON database as everything else (`db.users`), not a separate
+store. Every registered account is auto-linked (by matching name) to a `Player` roster
+entry where one exists, powering the "view my stats" link on the account page.
+
+Logged-in players can manage their own account from "My Account" (click their name, top
+right): update any profile field, or change their password (current password required).
+See `server/src/userAuth.js` for the implementation, and the roadmap for what a
+production version needs on top of this (password reset via email, and email
+verification at registration).
+
+### Admin & role management
+
+An account can be promoted to admin from the admin user management screen ("Manage
+Users", visible in the header once you're an admin) - this grants the same admin rights
+as the original hardcoded account, checked fresh on every request so promotion, demotion
+and suspension all take effect immediately without needing to log back in. From there an
+admin can:
+
+- Search all registered users and click through to edit any of their profile fields.
+- Promote a player to admin, or demote an admin back to a regular player.
+- Suspend an account (blocks that account's login immediately) or reactivate it.
+- Force-set a new password for a user without needing their current one.
+- Review the audit log of every admin action taken (who did what, and when).
+
+Admins also get a score-override control on every fixture's detail page, for correcting
+a result directly without replaying it frame-by-frame.
 
 ## Architecture
 
@@ -115,7 +159,8 @@ pool-league/
       db.js              JSON-file persistence layer (see note below)
       auth.js            Admin login + HMAC-signed session tokens
       userAuth.js        Player account registration/login, password hashing,
-                          requireAnyAuth (admin OR player) route gate
+                          requireAnyAuth (admin OR player) and requireAdminRole
+                          (super-admin OR promoted admin) route gates
       errors.js
       services/
         roundRobin.js    Circle-method scheduler (singles + teams)
@@ -123,13 +168,19 @@ pool-league/
         standings.js     Singles points table calculation
         teamStandings.js Team points table calculation
         playerProfile.js Career stats + head-to-head aggregation for a player
+        auditLog.js      Records admin actions (overrides, edits, role/status changes)
         seed.js          Seeds "Top Spin Singles" with 6 divisions + demo data
   client/            React (Vite) single-page app
     src/
       pages/                LeagueList, LeagueDetail, DivisionDetail, FixtureDetail,
-                            PlayerProfile, Login, Register, PlayerLogin
+                            PlayerProfile, Login, Register, PlayerLogin, Account,
+                            AdminUsers, AdminUserEdit, AdminAuditLog
+      components/
+        Breadcrumbs.jsx      Renders the shared breadcrumb trail
       AuthContext.jsx       Admin session state (token storage, login/logout)
       PlayerAuthContext.jsx Player session state, kept separate from admin
+      BreadcrumbContext.jsx Shared breadcrumb trail + useSetBreadcrumbs(...) hook
+      useAdminSession.js     True for either an admin session or a promoted-admin player
       api.js                Fetch wrapper for the REST API
 ```
 
@@ -163,10 +214,16 @@ script, not a rewrite. This is the top item in the roadmap.
     one its winner advances into; both are `null` for round-robin fixtures and for a
     knockout final.
 - `User` (player account): `id, firstName, lastName, email, passwordHash, phone,
-  venue, teamName, classification ('A'|'B'|'C'|'D'|null), createdAt`. Distinct from
-  `Player` above — a `Player` is a name entered into a division/team roster (by anyone,
-  no account needed); a `User` is a login the site's standard views are gated behind.
-  Nothing currently links the two records together (see roadmap).
+  venue, teamName, classification ('A'|'B'|'C'|'D'|null), role ('player'|'admin'),
+  status ('active'|'suspended'), playerId (linked Player, or null), createdAt`. Distinct
+  from `Player` above — a `Player` is a name entered into a division/team roster (by
+  anyone, no account needed); a `User` is a login the site's standard views are gated
+  behind. `playerId` links the two where a case-insensitive name match was found at
+  registration time (known limitation: two different real people who share an exact
+  name will be merged onto the same `Player` record - see roadmap).
+- `AuditLog` entry: `id, at, actor, action, targetType, targetId, details` — one entry
+  per admin action that affects another account or a fixture result; capped at the most
+  recent 500 entries.
 
 ## Running it locally
 
@@ -201,8 +258,18 @@ proxies `/api` requests to the Express server on port 4000, so run both at once.
 |---|---|---|
 | POST | `/api/auth/login` | Admin login, returns a signed token |
 | POST | `/api/users/register` | Player account self-registration, returns a signed token |
-| POST | `/api/users/login` | Player login, returns a signed token |
+| POST | `/api/users/login` | Player login, returns a signed token (blocked if the account is suspended) |
 | GET | `/api/users/me` | The logged-in player's own account details (requires player login) |
+| PATCH | `/api/users/me` | Update the logged-in player's own profile fields |
+| POST | `/api/users/me/change-password` | Change the logged-in player's own password (requires current password) |
+| GET | `/api/admin/users` | Search/list all users, `?q=` filters by name/email/venue/team (requires admin) |
+| GET | `/api/admin/users/:id` | Full details for one user (requires admin) |
+| PATCH | `/api/admin/users/:id` | Update any profile field on a user (requires admin; logged) |
+| POST | `/api/admin/users/:id/role` | Set a user's role to `player` or `admin` (requires admin; logged) |
+| POST | `/api/admin/users/:id/status` | Set a user's status to `active` or `suspended` (requires admin; logged) |
+| POST | `/api/admin/users/:id/reset-password` | Force-set a new password for a user (requires admin; logged) |
+| GET | `/api/admin/audit-log` | Most recent 200 admin actions (requires admin) |
+| POST | `/api/fixtures/:id/override` | Directly set a fixture's final score, bypassing frame-by-frame play (requires admin; logged; blocked if it would change a winner that's already advanced a started bracket fixture) |
 | GET/POST | `/api/leagues` | List (requires login, admin or player) / create leagues (requires admin) |
 | GET | `/api/leagues/:id` | League + its divisions (requires login) |
 | POST | `/api/leagues/:leagueId/divisions` | Add a division (requires admin; accepts `entryType`, `scheduling`, `legsPerMatch`) |
@@ -221,17 +288,18 @@ proxies `/api` requests to the Express server on port 4000, so run both at once.
 
 ## Roadmap
 
-1. Swap the JSON file store for Postgres, and move player/admin accounts toward
-   proper role-aware permissions (league admin vs. captain vs. player), including
-   linking a `User` account to the `Player` roster entries it corresponds to,
-   password reset, and email verification.
-2. Further scheduling methods: home/away double round robin, double elimination,
+1. Swap the JSON file store for Postgres, and add a proper `captain` role (registering
+   players/teams, generating fixtures and scoring matches are currently open to anyone
+   with the fixture/division URL rather than gated to a specific role).
+2. Password reset via email and email verification at registration (currently a forgotten
+   password requires an admin to force-reset it).
+3. Further scheduling methods: home/away double round robin, double elimination,
    mini-knockouts, and the ability to mix formats within one competition.
-3. Seeded/ranked knockout brackets (current v1 seeds in registration order, not by
+4. Seeded/ranked knockout brackets (current v1 seeds in registration order, not by
    past performance) and best-of-N handicaps.
-4. Deeper player statistics: form guides, break-and-continue / century-style stats if
+5. Deeper player statistics: form guides, break-and-continue / century-style stats if
    relevant to 8-ball, a "trophy cabinet" across seasons.
-5. Live-scoring niceties: tablet-optimized scoring UI, stream overlay endpoint,
+6. Live-scoring niceties: tablet-optimized scoring UI, stream overlay endpoint,
    shot/match timers — valuable but explicitly deferred until the core league engine
    above is solid.
 
