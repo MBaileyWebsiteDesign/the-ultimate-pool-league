@@ -84,15 +84,18 @@ full-featured competition management that Wix has no built-in system for.
 - **Admin user management**: admins get a searchable list of every registered user,
   clickable through to an edit screen where they can update any profile field,
   grant/revoke admin rights, mark/unmark someone as captain, suspend/reactivate the
-  account, and force-set a new password without knowing the old one — plus a bulk-add
-  panel right on the Manage Users page for onboarding a batch of players by CSV/Excel
-  upload (with a downloadable template) or one at a time. See **Admin permission
-  management** below.
+  account, and force-set a new password without knowing the old one.
 - **Admin score override**: admins can directly correct a fixture's final score at any
   time, bypassing frame-by-frame play — useful for fixing a scoring mistake after the
   fact. It's blocked only when changing the *winner* would silently corrupt a knockout
   bracket that's already progressed past that result; pure score corrections (same
   winner) are always allowed.
+- **Mid-season player substitution** (singles divisions): if a player drops out, an
+  admin can swap them for a replacement from the division's page. Every fixture of
+  theirs that hasn't been played yet moves to the replacement; anything already
+  completed - or already partway through - is left exactly as it was, so history and
+  standings for the games actually played never change. See **Player substitution**
+  below.
 - **Audit log**: every admin action that changes something on someone else's behalf
   (score overrides, profile edits, permission/status changes, forced password resets) is
   recorded with who did it and when, visible to admins from the Admin Portal.
@@ -144,11 +147,11 @@ Registration collects:
 
 Passwords are salted and hashed with Node's built-in `crypto.scrypt` (never stored in
 plaintext), and login issues an HMAC-signed token (24-hour expiry) stored in the
-browser's `localStorage`. Every account — self-registered or admin-created via bulk
-import or the Season Setup Wizard's CSV/Excel import — lives in the same `db.users`
-table and is auto-linked (by matching name) to a `Player` roster entry where one exists,
-powering the "view my stats" link on the account page and letting admins add them to a
-division or team roster.
+browser's `localStorage`. Every account — self-registered or admin-created via the
+Season Setup Wizard's CSV/Excel import — lives in the same `db.users` table and is
+auto-linked (by matching name) to a `Player` roster entry where one exists, powering the
+"view my stats" link on the account page and letting admins add them to a division or
+team roster.
 
 Logged-in users manage their own account from "My Account" (click their name, top
 right) — the Player Management Portal described above.
@@ -162,15 +165,14 @@ From the Admin Portal → "Manage Users", an admin can:
 - Mark or unmark any account as a captain (`isCaptain`).
 - Suspend an account (blocks that account's login immediately) or reactivate it.
 - Force-set a new password for a user without needing their current one.
-- **Bulk-add users** ("Bulk Add Users" panel at the top of the Manage Users page — click
-  "Upload CSV / Excel or add players" to expand it) — download a CSV or Excel template,
-  fill in a row per player, and upload it back; or add players one at a time with the
-  same fields. This creates accounts only, with no season/division attached (add them to
-  a specific roster afterwards from that division's page) - for standing up a whole new
-  season (leagues + rosters + fixtures) in one guided flow, use the Season Setup Wizard
-  instead. Each new account gets a random temporary password, shown once in the result
-  so it can be handed to that player; a row whose email already has an account is
-  skipped rather than duplicated or overwritten.
+- **Bulk-add users** ("Bulk Add Users" panel, top of the page) — download a CSV or
+  Excel template, fill in a row per player, and upload it back; or add players one at a
+  time with the same fields. This creates accounts only, with no season/division
+  attached (add them to a specific roster afterwards from that division's page) - for
+  standing up a whole new season (leagues + rosters + fixtures) in one guided flow, use
+  the Season Setup Wizard instead. Each new account gets a random temporary password,
+  shown once in the result so it can be handed to that player; a row whose email
+  already has an account is skipped rather than duplicated or overwritten.
 - Review the audit log of every admin action taken (who did what, and when).
 
 ## Season Setup Wizard
@@ -209,11 +211,36 @@ of its "leagues" is a `Division` (singles, round-robin) — so everything built 
 wizard immediately gets the same standings, fixtures and scoring UI as a league built by
 hand.
 
-Note: this CSV/Excel import is scoped to one season's divisions (the `division` column
-must match one of that season's league names). To bulk-add players without picking a
-season/division up front, use the separate "Bulk Add Users" panel on the Manage Users
-page instead (see **Admin permission management** above) — it has its own template and
-just creates accounts, which you then add to whichever roster you like afterwards.
+## Player substitution
+
+Real leagues lose players mid-season - someone moves away, drops out, whatever the
+reason. From a singles division's page (once fixtures have been generated), an admin
+sees a "Substitute a Player" panel: pick who's leaving and who's replacing them from the
+registered-player list, and:
+
+- Every fixture of the outgoing player's that's still `scheduled` (nobody has played it
+  yet) gets handed to the incoming player - same round, same opponent, just a new name
+  on that side.
+- Anything already `completed` is left completely untouched - the outgoing player's
+  record for the games they actually played stays exactly as it was, permanently.
+- Anything `in_progress` (some frames already recorded, but not finished) is also left
+  alone rather than guessed at - it's reported back separately so the admin knows it
+  still needs the outgoing player to finish it out, or an admin score override, before
+  it can be reassigned too.
+- The outgoing player isn't removed from the division - their standings row keeps
+  showing whatever they'd already played, it just stops growing. The incoming player is
+  added alongside them and starts accumulating their own record from that point on.
+- Every substitution is recorded (who was swapped for whom, when, by which admin, how
+  many fixtures moved) both in the division's own history (shown right under the panel)
+  and in the general admin audit log.
+
+There's currently no "wipe the score and start the replacement from zero" option - if
+that's ever needed, it should be built as its own explicit feature rather than folded
+into this one, since it would mean deciding what happens to frames/results that already
+count toward someone's record. Team-division substitution isn't covered yet either
+(rosters can already be edited directly before fixtures are generated; mid-season team
+swaps would need their own design since team fixtures don't reference individual
+players directly the way singles ones do).
 
 ## Venues
 
@@ -236,7 +263,7 @@ pool-league/
   server/            Node.js + Express REST API
     src/
       index.js          Routes, static hosting of the built client, season wizard
-                         endpoints, bulk user import, fixture date scheduling
+                         endpoints, fixture date scheduling
       db.js              JSON-file persistence layer (see note below)
       userAuth.js        Unified account model: registration/login, password hashing,
                           temp password generation, requireAuth (any logged-in account)
@@ -256,8 +283,8 @@ pool-league/
     src/
       pages/                LeagueList, LeagueDetail, DivisionDetail, FixtureDetail,
                             PlayerProfile, Login, Register, PlayerPortal, CaptainPortal,
-                            AdminPortal, AdminSeasonWizard, AdminUsers (includes the
-                            bulk-add panel), AdminUserEdit, AdminAuditLog, AdminVenues
+                            AdminPortal, AdminSeasonWizard, AdminUsers, AdminUserEdit,
+                            AdminAuditLog, AdminVenues
       components/
         Breadcrumbs.jsx      Renders the shared breadcrumb trail
         VenueSelect.jsx      Venue dropdown + "not listed" free-text fallback
@@ -386,6 +413,7 @@ publish through Pages.
 | POST/DELETE | `/api/divisions/:id/teams` | Add / remove a team (teams, pre-fixtures only) |
 | POST/DELETE | `/api/teams/:teamId/players` | Add / remove a player by `playerId` on a team roster (same registered-user requirement) |
 | POST | `/api/divisions/:id/generate-fixtures` | Generate the fixture list (round robin or knockout bracket, per the division's `scheduling`); optionally accepts `{ startDate, gapDays }` to also set `scheduledDate` on every fixture |
+| POST | `/api/divisions/:id/substitute-player` | Swap a player out for a replacement (singles only) - reassigns not-yet-started fixtures, leaves completed/in-progress ones alone (requires admin; logged) |
 | GET | `/api/fixtures/:id` | Fixture detail (requires login; singles or team, includes `bothEntrantsKnown` for knockout TBD slots) |
 | POST | `/api/fixtures/:id/frames` | Record a frame winner (singles) |
 | DELETE | `/api/fixtures/:id/frames/last` | Undo the last recorded frame (blocked once the result has advanced a bracket) |
