@@ -11,11 +11,19 @@ import Account from './pages/Account.jsx';
 import AdminUsers from './pages/AdminUsers.jsx';
 import AdminUserEdit from './pages/AdminUserEdit.jsx';
 import AdminAuditLog from './pages/AdminAuditLog.jsx';
+import AdminVenues from './pages/AdminVenues.jsx';
 import { AuthProvider, useAuth } from './AuthContext.jsx';
 import { PlayerAuthProvider, usePlayerAuth } from './PlayerAuthContext.jsx';
 import { BreadcrumbProvider } from './BreadcrumbContext.jsx';
 import Breadcrumbs from './components/Breadcrumbs.jsx';
 import { useIsAdminSession } from './useAdminSession.js';
+import { reconcileSessions } from './sessionBus.js';
+
+// Runs once when this module loads, before AuthProvider/PlayerAuthProvider
+// read their initial state - cleans up the (now-disallowed) case where both
+// an admin and a player session were stored from before sessions became
+// mutually exclusive.
+reconcileSessions();
 
 // Gates the standard "view the site" pages: being logged in as EITHER an
 // admin or a registered player is enough. Anonymous visitors are bounced to
@@ -147,6 +155,7 @@ function AppShell() {
           <Route path="/admin/users" element={<RequireAdminSession><AdminUsers /></RequireAdminSession>} />
           <Route path="/admin/users/:userId" element={<RequireAdminSession><AdminUserEdit /></RequireAdminSession>} />
           <Route path="/admin/audit-log" element={<RequireAdminSession><AdminAuditLog /></RequireAdminSession>} />
+          <Route path="/admin/venues" element={<RequireAdminSession><AdminVenues /></RequireAdminSession>} />
           <Route path="/leagues/:leagueId" element={<RequireLogin><LeagueDetail /></RequireLogin>} />
           <Route path="/divisions/:divisionId" element={<RequireLogin><DivisionDetail /></RequireLogin>} />
           <Route path="/fixtures/:fixtureId" element={<RequireLogin><FixtureDetail /></RequireLogin>} />

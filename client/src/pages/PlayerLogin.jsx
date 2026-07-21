@@ -33,6 +33,9 @@ export default function PlayerLogin() {
         Sign in to browse leagues, divisions, fixtures and player profiles. No account
         yet? <Link to="/account/register">Create one</Link>.
       </p>
+      <p className="muted">
+        Note: signing in here will log you out of an admin session in this browser.
+      </p>
       <form className="card form" onSubmit={onSubmit}>
         <label>
           Email

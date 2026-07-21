@@ -1,4 +1,5 @@
-import { createContext, useContext, useState, useCallback } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import { announceLogin, onLogin } from './sessionBus.js';
 
 const AuthContext = createContext(null);
 const STORAGE_KEY = 'poolLeagueAdminSession';
@@ -21,10 +22,20 @@ function loadStoredSession() {
 export function AuthProvider({ children }) {
   const [session, setSession] = useState(loadStoredSession);
 
+  // Admin and player sessions are mutually exclusive - if a player logs in
+  // elsewhere in the app, drop any admin session immediately.
+  useEffect(() => onLogin((kind) => {
+    if (kind === 'player') {
+      localStorage.removeItem(STORAGE_KEY);
+      setSession(null);
+    }
+  }), []);
+
   const login = useCallback((token, expiresAt) => {
     const next = { token, expiresAt };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
     setSession(next);
+    announceLogin('admin');
   }, []);
 
   const logout = useCallback(() => {

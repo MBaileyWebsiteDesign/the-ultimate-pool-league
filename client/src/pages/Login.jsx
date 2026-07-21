@@ -33,6 +33,9 @@ export default function Login() {
         Sign in to create leagues and divisions. Everyone else can browse leagues,
         register players, generate fixtures and score matches without logging in.
       </p>
+      <p className="muted">
+        Note: signing in here will log you out of any player account session in this browser.
+      </p>
       <form className="card form" onSubmit={onSubmit}>
         <label>
           Username
