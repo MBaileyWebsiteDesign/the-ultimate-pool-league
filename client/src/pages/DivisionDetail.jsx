@@ -91,6 +91,7 @@ function SinglesRoster({ division, registeredPlayers, onChange, setError }) {
 function PlayerSubstitutionPanel({ division, registeredPlayers, onChange, setError }) {
   const [outgoingId, setOutgoingId] = useState('');
   const [incomingId, setIncomingId] = useState('');
+  const [reason, setReason] = useState('substitution');
   const [result, setResult] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -104,10 +105,11 @@ function PlayerSubstitutionPanel({ division, registeredPlayers, onChange, setErr
     setResult(null);
     setSubmitting(true);
     try {
-      const res = await api.substitutePlayer(division.id, outgoingId, incomingId);
+      const res = await api.substitutePlayer(division.id, outgoingId, incomingId, reason);
       setResult(res);
       setOutgoingId('');
       setIncomingId('');
+      setReason('substitution');
       onChange();
     } catch (err) {
       setError(err.message);
@@ -120,9 +122,9 @@ function PlayerSubstitutionPanel({ division, registeredPlayers, onChange, setErr
     <section className="card">
       <h2>Substitute a Player</h2>
       <p className="muted" style={{ marginTop: -8, marginBottom: 12, fontSize: '0.8rem' }}>
-        If a player drops out, swap them for a replacement here. Completed matches (and any
-        already partway through) are left exactly as they are - only the outgoing player's
-        remaining, not-yet-started fixtures move to the replacement.
+        If a player drops out, swap them for a replacement here. Either way, only the outgoing
+        player's remaining, not-yet-started fixtures move to the replacement - completed matches
+        (and any already partway through) are left exactly as they are.
       </p>
       <form className="inline-form" onSubmit={onSubmit}>
         <select value={outgoingId} onChange={(e) => setOutgoingId(e.target.value)} required>
@@ -139,15 +141,28 @@ function PlayerSubstitutionPanel({ division, registeredPlayers, onChange, setErr
             <option key={p.id} value={p.id}>{p.name}</option>
           ))}
         </select>
+        <select value={reason} onChange={(e) => setReason(e.target.value)} required>
+          <option value="substitution">Temporary cover (stays on the table)</option>
+          <option value="retirement">Leaving the league (remove from the table)</option>
+        </select>
         <button className="btn btn-primary" type="submit" disabled={!outgoingId || !incomingId || submitting}>
           {submitting ? 'Swapping…' : 'Swap Player'}
         </button>
       </form>
+      <p className="muted" style={{ marginTop: 8, fontSize: '0.8rem' }}>
+        <strong>Temporary cover</strong> keeps the outgoing player's row in the League Table with
+        their played-so-far record frozen - use this when someone's just missing a few games.
+        <strong> Leaving the league</strong> removes their row from the table entirely going
+        forward - use this when someone's pulling out or retiring for good. Either way, matches
+        they already completed stay exactly as recorded, so opponents' records aren't affected,
+        and the outgoing player's own stats history is still there on their profile page.
+      </p>
 
       {result && (
         <div className="banner banner-success" style={{ marginTop: 12 }}>
           <p style={{ margin: 0 }}>
             {result.swapped.length} remaining fixture{result.swapped.length === 1 ? '' : 's'} reassigned to the replacement.
+            {result.reason === 'retirement' && ' The outgoing player has been removed from the League Table.'}
             {result.blockedInProgress.length > 0 && (
               <>
                 {' '}{result.blockedInProgress.length} fixture{result.blockedInProgress.length === 1 ? '' : 's'} already had frames
@@ -164,7 +179,10 @@ function PlayerSubstitutionPanel({ division, registeredPlayers, onChange, setErr
           <ul className="fixture-list">
             {division.substitutions.map((s) => (
               <li key={s.id}>
-                <span>{s.outgoingPlayerName} &rarr; {s.incomingPlayerName} ({s.fixturesSwapped} fixture{s.fixturesSwapped === 1 ? '' : 's'})</span>
+                <span>
+                  {s.outgoingPlayerName} &rarr; {s.incomingPlayerName} ({s.fixturesSwapped} fixture{s.fixturesSwapped === 1 ? '' : 's'})
+                  {s.reason === 'retirement' ? ' · retired' : ''}
+                </span>
                 <span className="muted">{new Date(s.at).toLocaleDateString()} · {s.by}</span>
               </li>
             ))}
