@@ -37,7 +37,7 @@ jobs:
 
       - name: Install server dependencies
         working-directory: server
-        run: npm ci
+        run: npm install
 
       - name: Seed the demo dataset
         working-directory: server
@@ -49,7 +49,7 @@ jobs:
 
       - name: Install client dependencies
         working-directory: client
-        run: npm ci
+        run: npm install
 
       - name: Build static demo
         working-directory: client
