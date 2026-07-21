@@ -8,7 +8,7 @@ export default function AdminUsers() {
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
 
-  useSetBreadcrumbs([{ label: 'Home', to: '/' }, { label: 'Admin' }, { label: 'Users' }]);
+  useSetBreadcrumbs([{ label: 'Home', to: '/' }, { label: 'Admin', to: '/admin' }, { label: 'Users' }]);
 
   const load = (q) => api.adminListUsers(q).then(setUsers).catch((e) => setError(e.message));
 
@@ -27,8 +27,7 @@ export default function AdminUsers() {
       <div className="page-header">
         <h1>Manage Users</h1>
         <span className="inline-form" style={{ marginBottom: 0 }}>
-          <Link to="/admin/venues" className="btn">Manage Venues</Link>
-          <Link to="/admin/audit-log" className="btn">View Audit Log</Link>
+          <Link to="/admin" className="btn">&larr; Admin Portal</Link>
         </span>
       </div>
 
@@ -49,7 +48,7 @@ export default function AdminUsers() {
         <table className="standings-table">
           <thead>
             <tr>
-              <th>Name</th><th>Email</th><th>Venue</th><th>Team</th><th>Class</th><th>Role</th><th>Status</th>
+              <th>Name</th><th>Email</th><th>Venue</th><th>Team</th><th>Class</th><th>Flags</th><th>Status</th>
             </tr>
           </thead>
           <tbody>
@@ -62,7 +61,7 @@ export default function AdminUsers() {
                 <td style={{ textAlign: 'left' }}>{u.venue}</td>
                 <td style={{ textAlign: 'left' }}>{u.teamName}</td>
                 <td>{u.classification || '—'}</td>
-                <td>{u.role}</td>
+                <td>{[u.isAdmin && 'Admin', u.isCaptain && 'Captain'].filter(Boolean).join(', ') || '—'}</td>
                 <td>
                   <span className={`status ${u.status === 'suspended' ? '' : 'status-completed'}`}>{u.status}</span>
                 </td>

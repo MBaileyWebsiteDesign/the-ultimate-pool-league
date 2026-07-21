@@ -58,16 +58,18 @@ function ProfileForm({ user, onSaved, setError, setSuccess }) {
   );
 }
 
-function RoleStatusPanel({ user, onSaved, setError, setSuccess }) {
+// One account can be admin, captain, both or neither - these are independent
+// flags now (there's no single "role" to toggle between). Suspending an
+// account blocks its login immediately regardless of either flag.
+function PermissionsPanel({ user, onSaved, setError, setSuccess }) {
   const [busy, setBusy] = useState(false);
 
-  const toggleRole = async () => {
+  const setPermission = async (patch) => {
     setError(''); setSuccess(''); setBusy(true);
-    const nextRole = user.role === 'admin' ? 'player' : 'admin';
     try {
-      const updated = await api.adminSetRole(user.id, nextRole);
+      const updated = await api.adminSetPermissions(user.id, patch);
       onSaved(updated);
-      setSuccess(`Role set to ${nextRole}.`);
+      setSuccess('Permissions updated.');
     } catch (err) {
       setError(err.message);
     } finally {
@@ -91,18 +93,25 @@ function RoleStatusPanel({ user, onSaved, setError, setSuccess }) {
 
   return (
     <section className="card">
-      <h2>Role &amp; Status</h2>
+      <h2>Permissions &amp; Status</h2>
       <p className="muted">
-        Current role: <strong>{user.role}</strong> · Current status: <strong>{user.status}</strong>
+        Current status: <strong>{user.status}</strong>
       </p>
       <div className="inline-form">
-        <button className="btn" disabled={busy} onClick={toggleRole}>
-          {user.role === 'admin' ? 'Demote to Player' : 'Promote to Admin'}
+        <button className="btn" disabled={busy} onClick={() => setPermission({ isAdmin: !user.isAdmin })}>
+          {user.isAdmin ? 'Revoke Admin' : 'Grant Admin'}
+        </button>
+        <button className="btn" disabled={busy} onClick={() => setPermission({ isCaptain: !user.isCaptain })}>
+          {user.isCaptain ? 'Unmark Captain' : 'Mark as Captain'}
         </button>
         <button className="btn" disabled={busy} onClick={toggleStatus}>
           {user.status === 'suspended' ? 'Reactivate Account' : 'Suspend Account'}
         </button>
       </div>
+      <p className="muted" style={{ marginTop: 12, fontSize: '0.8rem' }}>
+        Admin unlocks the full Admin Portal (users, venues, seasons, audit log). Captain is
+        currently a flag only - team captain tools appear once team leagues launch.
+      </p>
     </section>
   );
 }
@@ -153,8 +162,8 @@ export default function AdminUserEdit() {
 
   useSetBreadcrumbs(
     user
-      ? [{ label: 'Home', to: '/' }, { label: 'Admin', to: '/admin/users' }, { label: 'Users', to: '/admin/users' }, { label: `${user.firstName} ${user.lastName}` }]
-      : [{ label: 'Home', to: '/' }, { label: 'Admin', to: '/admin/users' }, { label: 'Users', to: '/admin/users' }, { label: 'Loading…' }]
+      ? [{ label: 'Home', to: '/' }, { label: 'Admin', to: '/admin' }, { label: 'Users', to: '/admin/users' }, { label: `${user.firstName} ${user.lastName}` }]
+      : [{ label: 'Home', to: '/' }, { label: 'Admin', to: '/admin' }, { label: 'Users', to: '/admin/users' }, { label: 'Loading…' }]
   );
 
   if (!user && !error) return <p>Loading…</p>;
@@ -171,7 +180,7 @@ export default function AdminUserEdit() {
             <p className="muted"><Link to={`/players/${user.playerId}`}>View their stats &amp; match history</Link></p>
           )}
           <ProfileForm user={user} onSaved={setUser} setError={setError} setSuccess={setSuccess} />
-          <RoleStatusPanel user={user} onSaved={setUser} setError={setError} setSuccess={setSuccess} />
+          <PermissionsPanel user={user} onSaved={setUser} setError={setError} setSuccess={setSuccess} />
           <ResetPasswordForm user={user} setError={setError} setSuccess={setSuccess} />
         </>
       )}

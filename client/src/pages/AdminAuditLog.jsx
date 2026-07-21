@@ -7,7 +7,7 @@ export default function AdminAuditLog() {
   const [entries, setEntries] = useState(null);
   const [error, setError] = useState('');
 
-  useSetBreadcrumbs([{ label: 'Home', to: '/' }, { label: 'Admin', to: '/admin/users' }, { label: 'Audit Log' }]);
+  useSetBreadcrumbs([{ label: 'Home', to: '/' }, { label: 'Admin', to: '/admin' }, { label: 'Audit Log' }]);
 
   useEffect(() => {
     api.adminGetAuditLog().then(setEntries).catch((e) => setError(e.message));
@@ -15,7 +15,7 @@ export default function AdminAuditLog() {
 
   return (
     <div>
-      <p><Link to="/admin/users">&larr; Back to users</Link></p>
+      <p><Link to="/admin">&larr; Admin Portal</Link></p>
       <h1>Audit Log</h1>
       <p className="muted">
         Recent admin actions - score overrides and edits to user accounts. Most recent first.

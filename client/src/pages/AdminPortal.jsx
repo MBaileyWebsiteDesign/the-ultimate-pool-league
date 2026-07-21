@@ -1,0 +1,65 @@
+import { Link } from 'react-router-dom';
+import { useSetBreadcrumbs } from '../BreadcrumbContext.jsx';
+
+// The Admin Management Portal - the single landing page for everything an
+// admin manages: players/accounts, venues, whole new seasons (leagues +
+// divisions + rosters + fixtures in one guided flow), and the audit trail.
+// Score overrides aren't listed here since they're contextual to a specific
+// fixture - they live on that fixture's own page instead (see
+// FixtureDetail.jsx's AdminOverridePanel).
+export default function AdminPortal() {
+  useSetBreadcrumbs([{ label: 'Home', to: '/' }, { label: 'Admin Portal' }]);
+
+  return (
+    <div>
+      <h1>Admin Portal</h1>
+      <p className="muted">
+        Manage accounts, venues, and whole seasons from here. Score corrections for a
+        specific match are on that match's own page.
+      </p>
+
+      <div className="card-grid">
+        <Link to="/admin/seasons/new" className="card card-link">
+          <h2>+ New Season</h2>
+          <p className="muted">
+            Guided setup: name the season, choose how many leagues and players per league,
+            add players by CSV/Excel or manually, set the season's dates, and generate every
+            division's fixtures with the games spaced out automatically.
+          </p>
+        </Link>
+
+        <Link to="/" className="card card-link">
+          <h2>Leagues &amp; Seasons</h2>
+          <p className="muted">
+            Browse every league (including ones created by the season wizard), drill into a
+            division to manage its roster, or generate fixtures for a division on its own.
+          </p>
+        </Link>
+
+        <Link to="/admin/users" className="card card-link">
+          <h2>Manage Users</h2>
+          <p className="muted">
+            Search every account, edit any profile field, grant/revoke admin or captain
+            status, suspend or reactivate accounts, and force-reset passwords.
+          </p>
+        </Link>
+
+        <Link to="/admin/venues" className="card card-link">
+          <h2>Manage Venues</h2>
+          <p className="muted">
+            Approve or reject venues players have typed in that aren't already on the
+            shared list.
+          </p>
+        </Link>
+
+        <Link to="/admin/audit-log" className="card card-link">
+          <h2>Audit Log</h2>
+          <p className="muted">
+            Every admin action that affects someone else's account or a match result - who
+            did it, and when.
+          </p>
+        </Link>
+      </div>
+    </div>
+  );
+}

@@ -8,7 +8,7 @@ export default function AdminVenues() {
   const [error, setError] = useState('');
   const [busyId, setBusyId] = useState(null);
 
-  useSetBreadcrumbs([{ label: 'Home', to: '/' }, { label: 'Admin', to: '/admin/users' }, { label: 'Venues' }]);
+  useSetBreadcrumbs([{ label: 'Home', to: '/' }, { label: 'Admin', to: '/admin' }, { label: 'Venues' }]);
 
   const load = () => api.adminListVenues().then(setVenues).catch((e) => setError(e.message));
 
@@ -49,7 +49,7 @@ export default function AdminVenues() {
 
   return (
     <div>
-      <p><Link to="/admin/users">&larr; Back to users</Link></p>
+      <p><Link to="/admin">&larr; Admin Portal</Link></p>
       <h1>Manage Venues</h1>
       <p className="muted">
         Venues players type in that aren't already on the list are queued here automatically -
