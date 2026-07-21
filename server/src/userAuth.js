@@ -1,17 +1,20 @@
-// Player/member accounts - separate from the single hardcoded admin account
-// in auth.js. Anyone can self-register a player account; it's what gates the
-// standard "view the site" experience (browsing leagues, divisions,
-// fixtures, player profiles). Stored in the same JSON db as everything else
-// (db.users), not a separate store.
+// Single, unified account model. There used to be two separate login flows
+// (one hardcoded super-admin account, one self-registered "player" account) -
+// now there is exactly one kind of account (`db.users`), and `isAdmin` /
+// `isCaptain` are just boolean flags on it rather than a separate identity.
+// Anyone can log in with the same form; what they can see/do depends on
+// their flags, checked fresh on every request (so promoting, demoting or
+// suspending someone takes effect immediately, without them needing to log
+// back in).
 //
 // Passwords are hashed with Node's built-in `crypto.scrypt` (salted,
-// per-user) rather than stored in plaintext - no bcrypt dependency needed for
-// that. Session tokens reuse the same HMAC-signed-payload approach as
-// auth.js, but with a `player.` prefix so a player token and an admin token
-// can never be confused for one another even if compared directly.
+// per-user) - no bcrypt dependency needed. Session tokens are a hand-rolled
+// HMAC-signed payload (HMAC-SHA256 via Node's built-in `crypto`), which is
+// fine for a v1 with a single trusted deployment but should be swapped for a
+// real session/JWT library before this is exposed at real scale - see the
+// README roadmap.
 import crypto from 'crypto';
 import { ApiError } from './errors.js';
-import { verifyToken as verifyAdminToken } from './auth.js';
 import { readDb } from './db.js';
 
 const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-only-secret-change-me';
@@ -38,15 +41,25 @@ export function verifyPassword(password, stored) {
   return candidateBuf.length === hashBuf.length && crypto.timingSafeEqual(candidateBuf, hashBuf);
 }
 
-export function createUserToken(userId) {
+// Generates a short, human-typeable random password - used when an admin
+// creates an account on someone else's behalf (season CSV/Excel import, or
+// the wizard's "add a player manually" step) since there's no email
+// verification flow to let the player set their own. The plaintext is
+// returned to the admin once, in the API response, so they can hand it to
+// the player directly; only the hash is ever persisted.
+export function generateTempPassword() {
+  return crypto.randomBytes(6).toString('base64url'); // ~8 chars, url-safe
+}
+
+export function createSessionToken(userId) {
   const expiresAt = Date.now() + TOKEN_TTL_MS;
-  const payload = `player.${userId}.${expiresAt}`;
+  const payload = `user.${userId}.${expiresAt}`;
   const payloadB64 = Buffer.from(payload).toString('base64url');
   const signature = sign(payload);
   return { token: `${payloadB64}.${signature}`, expiresAt };
 }
 
-export function verifyUserToken(token) {
+export function verifySessionToken(token) {
   if (!token || typeof token !== 'string' || !token.includes('.')) return null;
   const [payloadB64, signature] = token.split('.');
   let payload;
@@ -62,7 +75,7 @@ export function verifyUserToken(token) {
     return null;
   }
   const parts = payload.split('.');
-  if (parts.length !== 3 || parts[0] !== 'player') return null;
+  if (parts.length !== 3 || parts[0] !== 'user') return null;
   const [, userId, expiresAtStr] = parts;
   const expiresAt = Number(expiresAtStr);
   if (!expiresAt || Date.now() > expiresAt) return null;
@@ -75,12 +88,17 @@ export function publicUser(user) {
   return rest;
 }
 
-// Looks up the live user record behind a verified token - role and
+function tokenFromHeader(req) {
+  const header = req.headers.authorization || '';
+  return header.startsWith('Bearer ') ? header.slice('Bearer '.length) : null;
+}
+
+// Looks up the live user record behind a verified token - flags and
 // suspension status can change after a token was issued (an admin can
-// promote/demote or suspend someone mid-session), so both are always read
-// fresh from the db rather than trusted from the token payload.
+// change them mid-session), so both are always read fresh from the db
+// rather than trusted from the token payload.
 function loadActiveUser(token) {
-  const session = verifyUserToken(token);
+  const session = verifySessionToken(token);
   if (!session) return null;
   const db = readDb();
   const user = db.users.find((u) => u.id === session.userId);
@@ -88,65 +106,37 @@ function loadActiveUser(token) {
   return user;
 }
 
-export function requireUser(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : null;
-  const user = loadActiveUser(token);
+// Standard "you must be logged in" gate - used both for the self-service
+// /users/me routes and for viewing the site at all (leagues, divisions,
+// fixtures, player profiles). Every account is the same kind of thing now,
+// so there's no separate "player vs admin" check here - see requireAdmin
+// below for the extra check admin-only routes add on top of this.
+export function requireAuth(req, res, next) {
+  const user = loadActiveUser(tokenFromHeader(req));
   if (!user) {
-    throw new ApiError(401, 'Player login required for this action');
+    throw new ApiError(401, 'Login required for this action');
   }
   if (user.status === 'suspended') {
     throw new ApiError(403, 'This account has been suspended');
   }
-  req.playerSession = { userId: user.id, user };
+  req.auth = { userId: user.id, user };
   next();
 }
 
-// Gates the standard "view the site" experience: browsing leagues,
-// divisions, fixtures and player profiles requires being logged in, but
-// either kind of account (admin or a self-registered player) is enough -
-// there's no extra privilege to viewing as admin vs. as a player.
-export function requireAnyAuth(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : null;
-
-  const adminSession = verifyAdminToken(token);
-  if (adminSession) {
-    req.session = { role: 'admin', ...adminSession };
-    return next();
+// Admin panel / admin-only-action gate: requires being logged in AND having
+// `isAdmin: true`. Any account can be flagged as admin (see
+// POST /api/admin/users/:id/permissions) - there's no tiered admin
+// permission model in this v1, every admin can do everything, including
+// managing other admins and their own account.
+export function requireAdmin(req, res, next) {
+  const user = loadActiveUser(tokenFromHeader(req));
+  if (!user || user.status === 'suspended') {
+    throw new ApiError(401, 'Login required for this action');
   }
-
-  const user = loadActiveUser(token);
-  if (user && user.status !== 'suspended') {
-    req.session = { role: 'player', userId: user.id };
-    return next();
+  if (!user.isAdmin) {
+    throw new ApiError(403, 'Admin access required');
   }
-
-  throw new ApiError(401, 'Login required to view this');
-}
-
-// Admin panel / admin-only-action gate: accepts EITHER the single hardcoded
-// super-admin account (auth.js) OR a player account that's been promoted to
-// role: 'admin' (and isn't suspended). Both grant full admin capability -
-// there's no tiered admin permission model in this v1, a promoted admin can
-// do everything the super-admin can (including promote/demote/suspend other
-// accounts). req.adminSession.label is a human-readable actor name for audit
-// log entries.
-export function requireAdminRole(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : null;
-
-  const superSession = verifyAdminToken(token);
-  if (superSession) {
-    req.adminSession = { type: 'super', label: 'Admin' };
-    return next();
-  }
-
-  const user = loadActiveUser(token);
-  if (user && user.role === 'admin' && user.status !== 'suspended') {
-    req.adminSession = { type: 'user', userId: user.id, label: `${user.firstName} ${user.lastName}` };
-    return next();
-  }
-
-  throw new ApiError(403, 'Admin access required');
+  req.auth = { userId: user.id, user };
+  req.adminSession = { label: `${user.firstName} ${user.lastName}` };
+  next();
 }

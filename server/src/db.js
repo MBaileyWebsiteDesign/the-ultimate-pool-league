@@ -45,7 +45,11 @@ export function readDb() {
   if (!state.auditLog) state.auditLog = [];
   if (!state.venues) state.venues = [];
   for (const user of state.users) {
-    if (!user.role) user.role = 'player';
+    // Migrate the old single-value `role: 'player'|'admin'` field (from when
+    // admin/player were separate login flows) into the current boolean
+    // flags, which support being both at once.
+    if (user.isAdmin === undefined) user.isAdmin = user.role === 'admin';
+    if (user.isCaptain === undefined) user.isCaptain = false;
     if (!user.status) user.status = 'active';
     if (user.playerId === undefined) user.playerId = null;
   }
