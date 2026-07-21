@@ -54,6 +54,12 @@ body {
   gap: 12px;
 }
 
+.header-accounts {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
 .admin-badge {
   background: rgba(255, 255, 255, 0.2);
   color: white;

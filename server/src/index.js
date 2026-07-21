@@ -12,6 +12,15 @@ import { computeTeamStandings } from './services/teamStandings.js';
 import { buildPlayerProfile } from './services/playerProfile.js';
 import { ApiError } from './errors.js';
 import { login, requireAdmin } from './auth.js';
+import {
+  CLASSIFICATIONS,
+  hashPassword,
+  verifyPassword,
+  createUserToken,
+  publicUser,
+  requireUser,
+  requireAnyAuth,
+} from './userAuth.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.join(__dirname, '..', '..', 'client', 'dist');
@@ -42,9 +51,78 @@ app.post('/api/auth/login', asyncRoute((req, res) => {
   res.json({ token, expiresAt });
 }));
 
+// ---------- Player/member accounts ----------
+// Separate from the single admin account above: anyone can self-register a
+// player account, and having *either* kind of account is what's required to
+// view the standard site (see requireAnyAuth in userAuth.js). Stored in the
+// same JSON db as everything else, in db.users.
+
+app.post('/api/users/register', asyncRoute((req, res) => {
+  const {
+    firstName, lastName, email, password,
+    phone = '', venue, teamName, classification = null,
+  } = req.body;
+
+  if (!firstName || !firstName.trim()) throw new ApiError(400, 'First name is required');
+  if (!lastName || !lastName.trim()) throw new ApiError(400, 'Last name is required');
+  if (!email || !email.trim()) throw new ApiError(400, 'Email is required');
+  if (!password || password.length < 8) throw new ApiError(400, 'Password must be at least 8 characters');
+  if (!venue || !venue.trim()) throw new ApiError(400, 'Venue is required');
+  if (!teamName || !teamName.trim()) throw new ApiError(400, 'Team name is required');
+  if (classification && !CLASSIFICATIONS.includes(classification)) {
+    throw new ApiError(400, `classification must be one of: ${CLASSIFICATIONS.join(', ')}`);
+  }
+
+  const db = readDb();
+  const normalizedEmail = email.trim().toLowerCase();
+  if (db.users.some((u) => u.email.toLowerCase() === normalizedEmail)) {
+    throw new ApiError(409, 'An account with this email already exists');
+  }
+
+  const user = {
+    id: uuid(),
+    firstName: firstName.trim(),
+    lastName: lastName.trim(),
+    email: email.trim(),
+    passwordHash: hashPassword(password),
+    phone: phone ? phone.trim() : '',
+    venue: venue.trim(),
+    teamName: teamName.trim(),
+    classification: classification || null,
+    createdAt: new Date().toISOString(),
+  };
+  db.users.push(user);
+  writeDb(db);
+
+  const { token, expiresAt } = createUserToken(user.id);
+  res.status(201).json({ token, expiresAt, user: publicUser(user) });
+}));
+
+app.post('/api/users/login', asyncRoute((req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) throw new ApiError(400, 'Email and password are required');
+
+  const db = readDb();
+  const normalizedEmail = email.trim().toLowerCase();
+  const user = db.users.find((u) => u.email.toLowerCase() === normalizedEmail);
+  if (!user || !verifyPassword(password, user.passwordHash)) {
+    throw new ApiError(401, 'Invalid email or password');
+  }
+
+  const { token, expiresAt } = createUserToken(user.id);
+  res.json({ token, expiresAt, user: publicUser(user) });
+}));
+
+app.get('/api/users/me', requireUser, asyncRoute((req, res) => {
+  const db = readDb();
+  const user = db.users.find((u) => u.id === req.playerSession.userId);
+  if (!user) throw new ApiError(404, 'Player account not found');
+  res.json(publicUser(user));
+}));
+
 // ---------- Leagues ----------
 
-app.get('/api/leagues', asyncRoute((req, res) => {
+app.get('/api/leagues', requireAnyAuth, asyncRoute((req, res) => {
   const db = readDb();
   res.json(db.leagues);
 }));
@@ -66,7 +144,7 @@ app.post('/api/leagues', requireAdmin, asyncRoute((req, res) => {
   res.status(201).json(league);
 }));
 
-app.get('/api/leagues/:id', asyncRoute((req, res) => {
+app.get('/api/leagues/:id', requireAnyAuth, asyncRoute((req, res) => {
   const db = readDb();
   const league = db.leagues.find((l) => l.id === req.params.id);
   if (!league) throw new ApiError(404, 'League not found');
@@ -137,7 +215,7 @@ function hydrateDivision(db, division) {
   return { ...division, players, fixtures, standings };
 }
 
-app.get('/api/divisions/:id', asyncRoute((req, res) => {
+app.get('/api/divisions/:id', requireAnyAuth, asyncRoute((req, res) => {
   const db = readDb();
   const division = db.divisions.find((d) => d.id === req.params.id);
   if (!division) throw new ApiError(404, 'Division not found');
@@ -424,7 +502,7 @@ app.post('/api/divisions/:id/generate-fixtures', asyncRoute((req, res) => {
 
 // ---------- Fixtures / frame scoring (singles) ----------
 
-app.get('/api/fixtures/:id', asyncRoute((req, res) => {
+app.get('/api/fixtures/:id', requireAnyAuth, asyncRoute((req, res) => {
   const db = readDb();
   const fixture = db.fixtures.find((f) => f.id === req.params.id);
   if (!fixture) throw new ApiError(404, 'Fixture not found');
@@ -630,12 +708,12 @@ app.delete('/api/fixtures/:id/legs/:legNumber/frames/last', asyncRoute((req, res
 
 // ---------- Players ----------
 
-app.get('/api/players', asyncRoute((req, res) => {
+app.get('/api/players', requireAnyAuth, asyncRoute((req, res) => {
   const db = readDb();
   res.json(db.players);
 }));
 
-app.get('/api/players/:id', asyncRoute((req, res) => {
+app.get('/api/players/:id', requireAnyAuth, asyncRoute((req, res) => {
   const db = readDb();
   const profile = buildPlayerProfile(db, req.params.id);
   if (!profile) throw new ApiError(404, 'Player not found');

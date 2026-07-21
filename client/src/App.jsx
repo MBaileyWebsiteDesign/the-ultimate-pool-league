@@ -1,13 +1,30 @@
-import { Routes, Route, Link, useNavigate } from 'react-router-dom';
+import { Routes, Route, Link, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import LeagueList from './pages/LeagueList.jsx';
 import LeagueDetail from './pages/LeagueDetail.jsx';
 import DivisionDetail from './pages/DivisionDetail.jsx';
 import FixtureDetail from './pages/FixtureDetail.jsx';
 import PlayerProfile from './pages/PlayerProfile.jsx';
 import Login from './pages/Login.jsx';
+import Register from './pages/Register.jsx';
+import PlayerLogin from './pages/PlayerLogin.jsx';
 import { AuthProvider, useAuth } from './AuthContext.jsx';
+import { PlayerAuthProvider, usePlayerAuth } from './PlayerAuthContext.jsx';
 
-function HeaderAuthControl() {
+// Gates the standard "view the site" pages: being logged in as EITHER an
+// admin or a registered player is enough. Anonymous visitors are bounced to
+// the player login page (registration is one click away from there).
+function RequireLogin({ children }) {
+  const { isAdmin } = useAuth();
+  const { isPlayerLoggedIn } = usePlayerAuth();
+  const location = useLocation();
+
+  if (!isAdmin && !isPlayerLoggedIn) {
+    return <Navigate to="/account/login" state={{ from: location }} replace />;
+  }
+  return children;
+}
+
+function AdminHeaderControl() {
   const { isAdmin, logout } = useAuth();
   const navigate = useNavigate();
 
@@ -35,6 +52,34 @@ function HeaderAuthControl() {
   );
 }
 
+function PlayerHeaderControl() {
+  const { isPlayerLoggedIn, player, logout } = usePlayerAuth();
+  const navigate = useNavigate();
+
+  if (!isPlayerLoggedIn) {
+    return (
+      <Link to="/account/login" className="header-link">
+        Login
+      </Link>
+    );
+  }
+
+  return (
+    <span className="header-admin">
+      <span className="admin-badge">{player?.firstName || 'Player'}</span>
+      <button
+        className="header-link header-link-button"
+        onClick={() => {
+          logout();
+          navigate('/account/login');
+        }}
+      >
+        Log out
+      </button>
+    </span>
+  );
+}
+
 function AppShell() {
   return (
     <div className="app-shell">
@@ -42,16 +87,21 @@ function AppShell() {
         <Link to="/" className="brand">
           🎱 The Ultimate Pool League
         </Link>
-        <HeaderAuthControl />
+        <span className="header-accounts">
+          <PlayerHeaderControl />
+          <AdminHeaderControl />
+        </span>
       </header>
       <main className="app-main">
         <Routes>
-          <Route path="/" element={<LeagueList />} />
+          <Route path="/" element={<RequireLogin><LeagueList /></RequireLogin>} />
           <Route path="/login" element={<Login />} />
-          <Route path="/leagues/:leagueId" element={<LeagueDetail />} />
-          <Route path="/divisions/:divisionId" element={<DivisionDetail />} />
-          <Route path="/fixtures/:fixtureId" element={<FixtureDetail />} />
-          <Route path="/players/:playerId" element={<PlayerProfile />} />
+          <Route path="/account/login" element={<PlayerLogin />} />
+          <Route path="/account/register" element={<Register />} />
+          <Route path="/leagues/:leagueId" element={<RequireLogin><LeagueDetail /></RequireLogin>} />
+          <Route path="/divisions/:divisionId" element={<RequireLogin><DivisionDetail /></RequireLogin>} />
+          <Route path="/fixtures/:fixtureId" element={<RequireLogin><FixtureDetail /></RequireLogin>} />
+          <Route path="/players/:playerId" element={<RequireLogin><PlayerProfile /></RequireLogin>} />
         </Routes>
       </main>
     </div>
@@ -61,7 +111,9 @@ function AppShell() {
 export default function App() {
   return (
     <AuthProvider>
-      <AppShell />
+      <PlayerAuthProvider>
+        <AppShell />
+      </PlayerAuthProvider>
     </AuthProvider>
   );
 }
