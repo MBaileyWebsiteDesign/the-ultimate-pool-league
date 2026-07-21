@@ -11,21 +11,19 @@ import { computeStandings } from './services/standings.js';
 import { computeTeamStandings } from './services/teamStandings.js';
 import { buildPlayerProfile } from './services/playerProfile.js';
 import { ApiError } from './errors.js';
-import { login } from './auth.js';
 import {
   CLASSIFICATIONS,
   hashPassword,
   verifyPassword,
-  createUserToken,
-  verifyUserToken,
+  generateTempPassword,
+  createSessionToken,
+  verifySessionToken,
   publicUser,
-  requireUser,
-  requireAnyAuth,
-  requireAdminRole,
+  requireAuth,
+  requireAdmin,
 } from './userAuth.js';
 import { recordAudit } from './services/auditLog.js';
 
-const ROLES = ['player', 'admin'];
 const STATUSES = ['active', 'suspended'];
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -33,7 +31,7 @@ const CLIENT_DIST = path.join(__dirname, '..', '..', 'client', 'dist');
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '5mb' })); // season CSV/Excel imports can be a few hundred rows
 
 const asyncRoute = (fn) => (req, res, next) => {
   try {
@@ -45,23 +43,30 @@ const asyncRoute = (fn) => (req, res, next) => {
 
 const SCHEDULING_TYPES = ['round_robin_single', 'knockout_single_elim'];
 
-// ---------- Auth ----------
-// Single hardcoded admin account (see auth.js for why). Only league and
-// division *creation* are gated behind this for now, per the current
-// requirement - team/player management, fixture generation and match
-// scoring remain open. Tighten further (e.g. captain-only scoring) later.
+// ---------- Accounts & auth ----------
+// One account model, one login. `db.users` holds everyone; `isAdmin` and
+// `isCaptain` are just boolean flags on an account rather than a separate
+// kind of account. Anyone can self-register (POST /users/register), and an
+// admin can flag any account as admin and/or captain from the user
+// management screen, or via the season CSV/Excel import.
 
 app.post('/api/auth/login', asyncRoute((req, res) => {
-  const { username, password } = req.body;
-  const { token, expiresAt } = login(username, password);
-  res.json({ token, expiresAt });
-}));
+  const { email, password } = req.body;
+  if (!email || !password) throw new ApiError(400, 'Email and password are required');
 
-// ---------- Player/member accounts ----------
-// Separate from the single admin account above: anyone can self-register a
-// player account, and having *either* kind of account is what's required to
-// view the standard site (see requireAnyAuth in userAuth.js). Stored in the
-// same JSON db as everything else, in db.users.
+  const db = readDb();
+  const normalizedEmail = email.trim().toLowerCase();
+  const user = db.users.find((u) => u.email.toLowerCase() === normalizedEmail);
+  if (!user || !verifyPassword(password, user.passwordHash)) {
+    throw new ApiError(401, 'Invalid email or password');
+  }
+  if (user.status === 'suspended') {
+    throw new ApiError(403, 'This account has been suspended');
+  }
+
+  const { token, expiresAt } = createSessionToken(user.id);
+  res.json({ token, expiresAt, user: publicUser(user) });
+}));
 
 app.post('/api/users/register', asyncRoute((req, res) => {
   const {
@@ -85,21 +90,7 @@ app.post('/api/users/register', asyncRoute((req, res) => {
     throw new ApiError(409, 'An account with this email already exists');
   }
 
-  // Every registered account gets a linked `Player` roster record under the
-  // same name (find-or-create, matching the same case-insensitive dedup used
-  // when a captain adds a player directly) - this is what lets "my stats"
-  // on the account page point somewhere immediately, even before they've
-  // been added to a division. See the README data model note on User vs
-  // Player for the known limitation (name collisions merge onto one Player).
-  const fullName = `${firstName.trim()} ${lastName.trim()}`;
-  let linkedPlayer = db.players.find((p) => p.name.toLowerCase() === fullName.toLowerCase());
-  if (!linkedPlayer) {
-    linkedPlayer = { id: uuid(), name: fullName };
-    db.players.push(linkedPlayer);
-  }
-
-  const user = {
-    id: uuid(),
+  const user = createUserAccount(db, {
     firstName: firstName.trim(),
     lastName: lastName.trim(),
     email: email.trim(),
@@ -108,40 +99,51 @@ app.post('/api/users/register', asyncRoute((req, res) => {
     venue: venue.trim(),
     teamName: teamName.trim(),
     classification: classification || null,
-    role: 'player',
+    isAdmin: false,
+    isCaptain: false,
+  });
+  ensureVenue(db, user.venue, user.id, `${user.firstName} ${user.lastName}`);
+  writeDb(db);
+
+  const { token, expiresAt } = createSessionToken(user.id);
+  res.status(201).json({ token, expiresAt, user: publicUser(user) });
+}));
+
+app.get('/api/users/me', requireAuth, asyncRoute((req, res) => {
+  res.json(publicUser(req.auth.user));
+}));
+
+// Shared account-creation helper: builds the User record (and its linked
+// Player roster entry, find-or-create by name) the same way whether the
+// account came from self-registration, the season CSV/Excel import, or the
+// wizard's "add a player manually" step. Doesn't write to disk - caller
+// batches the writeDb() once all rows in a request are processed.
+function createUserAccount(db, fields) {
+  const fullName = `${fields.firstName} ${fields.lastName}`;
+  let linkedPlayer = db.players.find((p) => p.name.toLowerCase() === fullName.toLowerCase());
+  if (!linkedPlayer) {
+    linkedPlayer = { id: uuid(), name: fullName };
+    db.players.push(linkedPlayer);
+  }
+  const user = {
+    id: uuid(),
+    firstName: fields.firstName,
+    lastName: fields.lastName,
+    email: fields.email,
+    passwordHash: fields.passwordHash,
+    phone: fields.phone || '',
+    venue: fields.venue,
+    teamName: fields.teamName,
+    classification: fields.classification || null,
+    isAdmin: !!fields.isAdmin,
+    isCaptain: !!fields.isCaptain,
     status: 'active',
     playerId: linkedPlayer.id,
     createdAt: new Date().toISOString(),
   };
   db.users.push(user);
-  ensureVenue(db, user.venue, user.id, `${user.firstName} ${user.lastName}`);
-  writeDb(db);
-
-  const { token, expiresAt } = createUserToken(user.id);
-  res.status(201).json({ token, expiresAt, user: publicUser(user) });
-}));
-
-app.post('/api/users/login', asyncRoute((req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) throw new ApiError(400, 'Email and password are required');
-
-  const db = readDb();
-  const normalizedEmail = email.trim().toLowerCase();
-  const user = db.users.find((u) => u.email.toLowerCase() === normalizedEmail);
-  if (!user || !verifyPassword(password, user.passwordHash)) {
-    throw new ApiError(401, 'Invalid email or password');
-  }
-  if (user.status === 'suspended') {
-    throw new ApiError(403, 'This account has been suspended');
-  }
-
-  const { token, expiresAt } = createUserToken(user.id);
-  res.json({ token, expiresAt, user: publicUser(user) });
-}));
-
-app.get('/api/users/me', requireUser, asyncRoute((req, res) => {
-  res.json(publicUser(req.playerSession.user));
-}));
+  return user;
+}
 
 // Keeps a User's linked Player roster entry's display name in sync whenever
 // the account's name changes, whether the edit came from the player
@@ -214,15 +216,15 @@ function applyProfileFields(db, user, fields) {
   syncLinkedPlayerName(db, user);
 }
 
-app.patch('/api/users/me', requireUser, asyncRoute((req, res) => {
+app.patch('/api/users/me', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
-  const user = db.users.find((u) => u.id === req.playerSession.userId);
+  const user = db.users.find((u) => u.id === req.auth.userId);
   applyProfileFields(db, user, req.body);
   writeDb(db);
   res.json(publicUser(user));
 }));
 
-app.post('/api/users/me/change-password', requireUser, asyncRoute((req, res) => {
+app.post('/api/users/me/change-password', requireAuth, asyncRoute((req, res) => {
   const { currentPassword, newPassword } = req.body;
   if (!currentPassword || !newPassword) {
     throw new ApiError(400, 'Current and new password are required');
@@ -230,7 +232,7 @@ app.post('/api/users/me/change-password', requireUser, asyncRoute((req, res) => 
   if (newPassword.length < 8) throw new ApiError(400, 'New password must be at least 8 characters');
 
   const db = readDb();
-  const user = db.users.find((u) => u.id === req.playerSession.userId);
+  const user = db.users.find((u) => u.id === req.auth.userId);
   if (!verifyPassword(currentPassword, user.passwordHash)) {
     throw new ApiError(401, 'Current password is incorrect');
   }
@@ -239,14 +241,57 @@ app.post('/api/users/me/change-password', requireUser, asyncRoute((req, res) => 
   res.json({ ok: true });
 }));
 
+// A player's own upcoming/recent fixtures, across every division they're
+// registered in (singles) or rostered onto (teams) - powers the Player
+// Portal's "My Fixtures" panel without the client having to know which
+// divisions/teams they belong to.
+app.get('/api/users/me/fixtures', requireAuth, asyncRoute((req, res) => {
+  const db = readDb();
+  const user = req.auth.user;
+  if (!user.playerId) return res.json([]);
+  const playerId = user.playerId;
+
+  const myTeamIds = db.teams.filter((t) => t.playerIds.includes(playerId)).map((t) => t.id);
+
+  const fixtures = db.fixtures.filter((f) => {
+    if (f.homePlayerId === playerId || f.awayPlayerId === playerId) return true;
+    if (myTeamIds.includes(f.homeTeamId) || myTeamIds.includes(f.awayTeamId)) return true;
+    return false;
+  });
+
+  const enriched = fixtures.map((f) => {
+    const division = db.divisions.find((d) => d.id === f.divisionId);
+    const league = db.leagues.find((l) => l.id === f.leagueId);
+    const isTeams = !!f.legs;
+    const opponentId = isTeams
+      ? (myTeamIds.includes(f.homeTeamId) ? f.awayTeamId : f.homeTeamId)
+      : (f.homePlayerId === playerId ? f.awayPlayerId : f.homePlayerId);
+    const opponentName = isTeams
+      ? db.teams.find((t) => t.id === opponentId)?.name
+      : db.players.find((p) => p.id === opponentId)?.name;
+    return {
+      id: f.id,
+      leagueName: league?.name,
+      divisionName: division?.name,
+      round: f.round,
+      status: f.status,
+      scheduledDate: f.scheduledDate || null,
+      opponentName: opponentName || 'TBD',
+    };
+  });
+
+  enriched.sort((a, b) => (a.scheduledDate || '').localeCompare(b.scheduledDate || '') || a.round - b.round);
+  res.json(enriched);
+}));
+
 // ---------- Leagues ----------
 
-app.get('/api/leagues', requireAnyAuth, asyncRoute((req, res) => {
+app.get('/api/leagues', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
   res.json(db.leagues);
 }));
 
-app.post('/api/leagues', requireAdminRole, asyncRoute((req, res) => {
+app.post('/api/leagues', requireAdmin, asyncRoute((req, res) => {
   const { name, sport = 'English 8-Ball Pool', matchFormat = 'singles', raceTo = 6, scheduling = 'round_robin_single' } = req.body;
   if (!name || !name.trim()) throw new ApiError(400, 'League name is required');
 
@@ -256,6 +301,8 @@ app.post('/api/leagues', requireAdminRole, asyncRoute((req, res) => {
     name: name.trim(),
     sport,
     format: { matchFormat, raceTo, scheduling },
+    startDate: null,
+    endDate: null,
     createdAt: new Date().toISOString(),
   };
   db.leagues.push(league);
@@ -263,7 +310,7 @@ app.post('/api/leagues', requireAdminRole, asyncRoute((req, res) => {
   res.status(201).json(league);
 }));
 
-app.get('/api/leagues/:id', requireAnyAuth, asyncRoute((req, res) => {
+app.get('/api/leagues/:id', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
   const league = db.leagues.find((l) => l.id === req.params.id);
   if (!league) throw new ApiError(404, 'League not found');
@@ -283,7 +330,7 @@ app.get('/api/leagues/:id', requireAnyAuth, asyncRoute((req, res) => {
 //   league's own default, since a league often runs its regular season as a
 //   round robin but a separate cup division as a knockout.
 
-app.post('/api/leagues/:leagueId/divisions', requireAdminRole, asyncRoute((req, res) => {
+app.post('/api/leagues/:leagueId/divisions', requireAdmin, asyncRoute((req, res) => {
   const { name, order = 0, entryType = 'singles', legsPerMatch = 5 } = req.body;
   const db = readDb();
   const league = db.leagues.find((l) => l.id === req.params.leagueId);
@@ -311,6 +358,7 @@ app.post('/api/leagues/:leagueId/divisions', requireAdminRole, asyncRoute((req, 
     playerIds: [],
     teamIds: entryType === 'teams' ? [] : [],
     legsPerMatch: entryType === 'teams' ? Number(legsPerMatch) : null,
+    gapDays: null,
     fixturesGenerated: false,
   };
   db.divisions.push(division);
@@ -336,7 +384,7 @@ function hydrateDivision(db, division) {
   return { ...division, leagueName, players, fixtures, standings };
 }
 
-app.get('/api/divisions/:id', requireAnyAuth, asyncRoute((req, res) => {
+app.get('/api/divisions/:id', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
   const division = db.divisions.find((d) => d.id === req.params.id);
   if (!division) throw new ApiError(404, 'Division not found');
@@ -363,7 +411,7 @@ function registeredPlayers(db) {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-app.get('/api/registered-players', requireAnyAuth, asyncRoute((req, res) => {
+app.get('/api/registered-players', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
   res.json(registeredPlayers(db));
 }));
@@ -476,6 +524,7 @@ function makeSinglesFixture({ league, division, round }) {
     leagueId: league.id,
     divisionId: division.id,
     round,
+    scheduledDate: null,
     homePlayerId: null,
     awayPlayerId: null,
     raceTo: league.format.raceTo,
@@ -506,6 +555,7 @@ function makeTeamFixture({ league, division, round }) {
     leagueId: league.id,
     divisionId: division.id,
     round,
+    scheduledDate: null,
     homeTeamId: null,
     awayTeamId: null,
     legs,
@@ -612,7 +662,26 @@ function generateKnockoutFixtures({ db, league, division, entrantIds }) {
   fixturesByRound[0].forEach((fixture) => resolveByeIfNeeded(db, division, fixture));
 }
 
+// Assigns a `scheduledDate` (YYYY-MM-DD) to every fixture in a division,
+// spacing rounds `gapDays` apart starting at `startDate` - this is what the
+// season wizard's "gap between games" step controls. Not used for knockout
+// divisions with byes in a way that's aware of walkover timing; it just
+// spaces round N at startDate + (N-1)*gapDays, which is the right behaviour
+// for round robin (every division the wizard creates) and a reasonable
+// default for knockout too.
+function assignScheduledDates(db, division, startDate, gapDays) {
+  if (!startDate || !gapDays) return;
+  const base = new Date(`${startDate}T00:00:00`);
+  const fixtures = db.fixtures.filter((f) => f.divisionId === division.id);
+  for (const fixture of fixtures) {
+    const date = new Date(base);
+    date.setDate(date.getDate() + (fixture.round - 1) * Number(gapDays));
+    fixture.scheduledDate = date.toISOString().slice(0, 10);
+  }
+}
+
 app.post('/api/divisions/:id/generate-fixtures', asyncRoute((req, res) => {
+  const { startDate, gapDays } = req.body || {};
   const db = readDb();
   const division = db.divisions.find((d) => d.id === req.params.id);
   if (!division) throw new ApiError(404, 'Division not found');
@@ -633,6 +702,11 @@ app.post('/api/divisions/:id/generate-fixtures', asyncRoute((req, res) => {
     generateRoundRobinFixtures({ db, league, division, entrantIds });
   }
 
+  if (startDate && gapDays) {
+    division.gapDays = Number(gapDays);
+    assignScheduledDates(db, division, startDate, gapDays);
+  }
+
   division.fixturesGenerated = true;
   writeDb(db);
   res.status(201).json(hydrateDivision(db, division));
@@ -640,7 +714,7 @@ app.post('/api/divisions/:id/generate-fixtures', asyncRoute((req, res) => {
 
 // ---------- Fixtures / frame scoring (singles) ----------
 
-app.get('/api/fixtures/:id', requireAnyAuth, asyncRoute((req, res) => {
+app.get('/api/fixtures/:id', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
   const fixture = db.fixtures.find((f) => f.id === req.params.id);
   if (!fixture) throw new ApiError(404, 'Fixture not found');
@@ -855,7 +929,7 @@ app.delete('/api/fixtures/:id/legs/:legNumber/frames/last', asyncRoute((req, res
 // changed, but refuses if that would silently overwrite a match that's
 // already been played - the admin has to fix the downstream fixture first,
 // so a correction can never quietly erase someone else's recorded result.
-app.post('/api/fixtures/:id/override', requireAdminRole, asyncRoute((req, res) => {
+app.post('/api/fixtures/:id/override', requireAdmin, asyncRoute((req, res) => {
   const { homeScore, awayScore } = req.body;
   const db = readDb();
   const fixture = db.fixtures.find((f) => f.id === req.params.id);
@@ -933,12 +1007,12 @@ app.post('/api/fixtures/:id/override', requireAdminRole, asyncRoute((req, res) =
 
 // ---------- Players ----------
 
-app.get('/api/players', requireAnyAuth, asyncRoute((req, res) => {
+app.get('/api/players', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
   res.json(db.players);
 }));
 
-app.get('/api/players/:id', requireAnyAuth, asyncRoute((req, res) => {
+app.get('/api/players/:id', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
   const profile = buildPlayerProfile(db, req.params.id);
   if (!profile) throw new ApiError(404, 'Player not found');
@@ -946,14 +1020,12 @@ app.get('/api/players/:id', requireAnyAuth, asyncRoute((req, res) => {
 }));
 
 // ---------- Admin: user management ----------
-// Everything here requires requireAdminRole (the super-admin account or a
-// promoted player). A promoted admin can manage every account including
-// other admins and their own - there's no protection against an admin
-// demoting/suspending themselves in this v1; keep at least one working admin
-// login (the super-admin env-configured account always works) if you're
-// experimenting with roles.
+// Everything here requires requireAdmin (isAdmin: true on the account).
+// There's no protection against an admin demoting/suspending themselves in
+// this v1 - keep at least one other working admin account around if you're
+// experimenting with permissions.
 
-app.get('/api/admin/users', requireAdminRole, asyncRoute((req, res) => {
+app.get('/api/admin/users', requireAdmin, asyncRoute((req, res) => {
   const db = readDb();
   const q = (req.query.q || '').trim().toLowerCase();
   let users = db.users;
@@ -969,14 +1041,14 @@ app.get('/api/admin/users', requireAdminRole, asyncRoute((req, res) => {
   res.json(users.map(publicUser));
 }));
 
-app.get('/api/admin/users/:id', requireAdminRole, asyncRoute((req, res) => {
+app.get('/api/admin/users/:id', requireAdmin, asyncRoute((req, res) => {
   const db = readDb();
   const user = db.users.find((u) => u.id === req.params.id);
   if (!user) throw new ApiError(404, 'User not found');
   res.json(publicUser(user));
 }));
 
-app.patch('/api/admin/users/:id', requireAdminRole, asyncRoute((req, res) => {
+app.patch('/api/admin/users/:id', requireAdmin, asyncRoute((req, res) => {
   const db = readDb();
   const user = db.users.find((u) => u.id === req.params.id);
   if (!user) throw new ApiError(404, 'User not found');
@@ -992,25 +1064,36 @@ app.patch('/api/admin/users/:id', requireAdminRole, asyncRoute((req, res) => {
   res.json(publicUser(user));
 }));
 
-app.post('/api/admin/users/:id/role', requireAdminRole, asyncRoute((req, res) => {
-  const { role } = req.body;
-  if (!ROLES.includes(role)) throw new ApiError(400, `role must be one of: ${ROLES.join(', ')}`);
+// Sets isAdmin/isCaptain in one call - replaces the old single-value `role`
+// toggle now that an account can be both, either or neither.
+app.post('/api/admin/users/:id/permissions', requireAdmin, asyncRoute((req, res) => {
+  const { isAdmin, isCaptain } = req.body;
   const db = readDb();
   const user = db.users.find((u) => u.id === req.params.id);
   if (!user) throw new ApiError(404, 'User not found');
-  user.role = role;
-  recordAudit(db, {
-    actor: req.adminSession.label,
-    action: 'user.role',
-    targetType: 'user',
-    targetId: user.id,
-    details: `Set role of ${user.firstName} ${user.lastName} to ${role}`,
-  });
+  const changes = [];
+  if (isAdmin !== undefined && !!isAdmin !== user.isAdmin) {
+    user.isAdmin = !!isAdmin;
+    changes.push(user.isAdmin ? 'granted admin' : 'revoked admin');
+  }
+  if (isCaptain !== undefined && !!isCaptain !== user.isCaptain) {
+    user.isCaptain = !!isCaptain;
+    changes.push(user.isCaptain ? 'marked as captain' : 'unmarked as captain');
+  }
+  if (changes.length > 0) {
+    recordAudit(db, {
+      actor: req.adminSession.label,
+      action: 'user.permissions',
+      targetType: 'user',
+      targetId: user.id,
+      details: `${user.firstName} ${user.lastName}: ${changes.join(', ')}`,
+    });
+  }
   writeDb(db);
   res.json(publicUser(user));
 }));
 
-app.post('/api/admin/users/:id/status', requireAdminRole, asyncRoute((req, res) => {
+app.post('/api/admin/users/:id/status', requireAdmin, asyncRoute((req, res) => {
   const { status } = req.body;
   if (!STATUSES.includes(status)) throw new ApiError(400, `status must be one of: ${STATUSES.join(', ')}`);
   const db = readDb();
@@ -1028,7 +1111,7 @@ app.post('/api/admin/users/:id/status', requireAdminRole, asyncRoute((req, res) 
   res.json(publicUser(user));
 }));
 
-app.post('/api/admin/users/:id/reset-password', requireAdminRole, asyncRoute((req, res) => {
+app.post('/api/admin/users/:id/reset-password', requireAdmin, asyncRoute((req, res) => {
   const { newPassword } = req.body;
   if (!newPassword || newPassword.length < 8) {
     throw new ApiError(400, 'New password must be at least 8 characters');
@@ -1048,13 +1131,13 @@ app.post('/api/admin/users/:id/reset-password', requireAdminRole, asyncRoute((re
   res.json({ ok: true });
 }));
 
-app.get('/api/admin/audit-log', requireAdminRole, asyncRoute((req, res) => {
+app.get('/api/admin/audit-log', requireAdmin, asyncRoute((req, res) => {
   const db = readDb();
   const entries = [...db.auditLog].reverse().slice(0, 200);
   res.json(entries);
 }));
 
-// ---------- Venues ----------
+// ---------- Admin: venues ----------
 // A curated, admin-approved list of venues, seeded with a starter set (see
 // services/seed.js). New venue names typed at registration or in profile
 // edits are auto-queued as `pending` (see ensureVenue above) rather than
@@ -1070,7 +1153,7 @@ app.get('/api/venues', asyncRoute((req, res) => {
 
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : null;
-  const session = token ? verifyUserToken(token) : null;
+  const session = token ? verifySessionToken(token) : null;
   const mine = session
     ? db.venues.filter((v) => v.requestedBy === session.userId && v.status !== 'approved')
     : [];
@@ -1078,7 +1161,7 @@ app.get('/api/venues', asyncRoute((req, res) => {
   res.json({ approved, mine });
 }));
 
-app.get('/api/admin/venues', requireAdminRole, asyncRoute((req, res) => {
+app.get('/api/admin/venues', requireAdmin, asyncRoute((req, res) => {
   const db = readDb();
   const statusOrder = { pending: 0, approved: 1, rejected: 2 };
   const venues = [...db.venues].sort((a, b) =>
@@ -1087,7 +1170,7 @@ app.get('/api/admin/venues', requireAdminRole, asyncRoute((req, res) => {
   res.json(venues);
 }));
 
-app.post('/api/admin/venues/:id/approve', requireAdminRole, asyncRoute((req, res) => {
+app.post('/api/admin/venues/:id/approve', requireAdmin, asyncRoute((req, res) => {
   const db = readDb();
   const venue = db.venues.find((v) => v.id === req.params.id);
   if (!venue) throw new ApiError(404, 'Venue not found');
@@ -1105,7 +1188,7 @@ app.post('/api/admin/venues/:id/approve', requireAdminRole, asyncRoute((req, res
   res.json(venue);
 }));
 
-app.post('/api/admin/venues/:id/reject', requireAdminRole, asyncRoute((req, res) => {
+app.post('/api/admin/venues/:id/reject', requireAdmin, asyncRoute((req, res) => {
   const db = readDb();
   const venue = db.venues.find((v) => v.id === req.params.id);
   if (!venue) throw new ApiError(404, 'Venue not found');
@@ -1121,6 +1204,201 @@ app.post('/api/admin/venues/:id/reject', requireAdminRole, asyncRoute((req, res)
   });
   writeDb(db);
   res.json(venue);
+}));
+
+// ---------- Admin: season setup wizard ----------
+// Backs the 5-step "New Season" wizard in the admin portal:
+//   1. name the season            -> POST /api/admin/seasons
+//   2. how many leagues/players   -> (same call - leagueCount/playersPerLeague)
+//   3. CSV/Excel or manual add    -> POST /api/admin/seasons/:leagueId/import-players
+//   4. start/end date             -> (passed straight into step 5's call)
+//   5. generate fixtures + gaps   -> POST /api/admin/seasons/:leagueId/generate
+//
+// A "season" isn't a new top-level entity - it reuses League (the season)
+// and Division (each of the N "leagues" within it) so it gets standings,
+// fixtures and scoring for free from the existing engine. CSV/Excel parsing
+// itself happens client-side (see client/src/pages/AdminSeasonWizard.jsx);
+// the server just receives plain row objects either way.
+
+app.post('/api/admin/seasons', requireAdmin, asyncRoute((req, res) => {
+  const { name, leagueCount, playersPerLeague } = req.body;
+  if (!name || !name.trim()) throw new ApiError(400, 'Season name is required');
+  const count = Number(leagueCount);
+  const perLeague = Number(playersPerLeague);
+  if (!Number.isInteger(count) || count < 1 || count > 50) {
+    throw new ApiError(400, 'Number of leagues must be a whole number between 1 and 50');
+  }
+  if (!Number.isInteger(perLeague) || perLeague < 2 || perLeague > 200) {
+    throw new ApiError(400, 'Players per league must be a whole number between 2 and 200');
+  }
+
+  const db = readDb();
+  const league = {
+    id: uuid(),
+    name: name.trim(),
+    sport: 'English 8-Ball Pool',
+    format: { matchFormat: 'singles', raceTo: 6, scheduling: 'round_robin_single' },
+    startDate: null,
+    endDate: null,
+    createdAt: new Date().toISOString(),
+  };
+  db.leagues.push(league);
+
+  const divisions = [];
+  for (let i = 0; i < count; i++) {
+    const division = {
+      id: uuid(),
+      leagueId: league.id,
+      name: `League ${i + 1}`,
+      order: i,
+      entryType: 'singles',
+      scheduling: 'round_robin_single',
+      playerIds: [],
+      teamIds: [],
+      legsPerMatch: null,
+      gapDays: null,
+      targetPlayerCount: perLeague,
+      fixturesGenerated: false,
+    };
+    db.divisions.push(division);
+    divisions.push(division);
+  }
+
+  writeDb(db);
+  res.status(201).json({ ...league, divisions });
+}));
+
+// Bulk-imports players into one season's divisions - used both for a real
+// CSV/Excel upload (client parses the file, posts an array of row objects)
+// and for the wizard's "add a player manually" step (posts a single-row
+// array). Each row creates a brand-new account (with a generated temporary
+// password handed back to the admin) unless the email already matches an
+// existing account, in which case that person is just added to the
+// requested division instead of being duplicated.
+app.post('/api/admin/seasons/:leagueId/import-players', requireAdmin, asyncRoute((req, res) => {
+  const { rows } = req.body;
+  if (!Array.isArray(rows) || rows.length === 0) throw new ApiError(400, 'rows must be a non-empty array');
+
+  const db = readDb();
+  const league = db.leagues.find((l) => l.id === req.params.leagueId);
+  if (!league) throw new ApiError(404, 'Season not found');
+  const divisions = db.divisions.filter((d) => d.leagueId === league.id);
+  const divisionByName = new Map(divisions.map((d) => [d.name.trim().toLowerCase(), d]));
+
+  const created = [];
+  const linkedExisting = [];
+  const errors = [];
+
+  rows.forEach((row, index) => {
+    const rowNum = index + 1;
+    try {
+      const firstName = (row.firstName || '').trim();
+      const lastName = (row.lastName || '').trim();
+      const email = (row.email || '').trim();
+      const venue = (row.venue || '').trim();
+      const teamName = (row.teamName || '').trim() || 'Unassigned';
+      const classification = (row.classification || '').trim().toUpperCase() || null;
+      const divisionName = (row.division || '').trim();
+      const isCaptain = row.isCaptain === true || String(row.isCaptain).trim().toLowerCase() === 'true' || String(row.isCaptain).trim() === '1';
+
+      if (!firstName) throw new Error('firstName is required');
+      if (!lastName) throw new Error('lastName is required');
+      if (!email) throw new Error('email is required');
+      if (!venue) throw new Error('venue is required');
+      if (!divisionName) throw new Error('division is required');
+      if (classification && !CLASSIFICATIONS.includes(classification)) {
+        throw new Error(`classification must be one of: ${CLASSIFICATIONS.join(', ')}`);
+      }
+      const division = divisionByName.get(divisionName.toLowerCase());
+      if (!division) {
+        throw new Error(`division "${divisionName}" doesn't match any league in this season (expected one of: ${divisions.map((d) => d.name).join(', ')})`);
+      }
+      if (division.fixturesGenerated) {
+        throw new Error(`fixtures have already been generated for "${division.name}" - can't add more players`);
+      }
+
+      const normalizedEmail = email.toLowerCase();
+      let user = db.users.find((u) => u.email.toLowerCase() === normalizedEmail);
+      let tempPassword = null;
+
+      if (!user) {
+        tempPassword = generateTempPassword();
+        user = createUserAccount(db, {
+          firstName, lastName, email, passwordHash: hashPassword(tempPassword),
+          phone: (row.phone || '').trim(), venue, teamName, classification, isCaptain,
+        });
+        ensureVenue(db, user.venue, user.id, `${user.firstName} ${user.lastName}`);
+        created.push({ row: rowNum, name: `${firstName} ${lastName}`, email, division: division.name, tempPassword });
+      } else {
+        if (isCaptain && !user.isCaptain) user.isCaptain = true;
+        linkedExisting.push({ row: rowNum, name: `${user.firstName} ${user.lastName}`, email, division: division.name });
+      }
+
+      if (!division.playerIds.includes(user.playerId)) {
+        division.playerIds.push(user.playerId);
+      }
+    } catch (err) {
+      errors.push({ row: rowNum, reason: err.message });
+    }
+  });
+
+  writeDb(db);
+  res.status(created.length + linkedExisting.length > 0 ? 201 : 400).json({ created, linkedExisting, errors });
+}));
+
+// Generates round-robin fixtures for every division in the season that has
+// at least 2 players and hasn't been generated yet, spacing rounds
+// `gapDays` apart starting at `startDate`. Also stamps the season's
+// start/end dates onto the League record itself.
+app.post('/api/admin/seasons/:leagueId/generate', requireAdmin, asyncRoute((req, res) => {
+  const { startDate, endDate, gapDays } = req.body;
+  if (!startDate) throw new ApiError(400, 'startDate is required');
+  if (!endDate) throw new ApiError(400, 'endDate is required');
+  if (!Number.isInteger(Number(gapDays)) || Number(gapDays) < 1) {
+    throw new ApiError(400, 'gapDays must be a positive whole number of days between rounds');
+  }
+  if (new Date(endDate) < new Date(startDate)) {
+    throw new ApiError(400, 'endDate cannot be before startDate');
+  }
+
+  const db = readDb();
+  const league = db.leagues.find((l) => l.id === req.params.leagueId);
+  if (!league) throw new ApiError(404, 'Season not found');
+  league.startDate = startDate;
+  league.endDate = endDate;
+
+  const divisions = db.divisions.filter((d) => d.leagueId === league.id);
+  const generated = [];
+  const skipped = [];
+
+  for (const division of divisions) {
+    if (division.fixturesGenerated) {
+      skipped.push({ division: division.name, reason: 'fixtures already generated' });
+      continue;
+    }
+    if (division.playerIds.length < 2) {
+      skipped.push({ division: division.name, reason: `only ${division.playerIds.length} player(s) - needs at least 2` });
+      continue;
+    }
+    generateRoundRobinFixtures({ db, league, division, entrantIds: division.playerIds });
+    division.gapDays = Number(gapDays);
+    assignScheduledDates(db, division, startDate, gapDays);
+    division.fixturesGenerated = true;
+
+    const divisionFixtures = db.fixtures.filter((f) => f.divisionId === division.id);
+    const lastRound = Math.max(...divisionFixtures.map((f) => f.round));
+    const lastRoundDate = divisionFixtures.find((f) => f.round === lastRound)?.scheduledDate;
+    generated.push({
+      division: division.name,
+      players: division.playerIds.length,
+      rounds: lastRound,
+      lastGameDate: lastRoundDate,
+      fitsWithinEndDate: !lastRoundDate || lastRoundDate <= endDate,
+    });
+  }
+
+  writeDb(db);
+  res.status(201).json({ league: { id: league.id, name: league.name, startDate, endDate }, generated, skipped });
 }));
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
