@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useSetBreadcrumbs } from '../BreadcrumbContext.jsx';
+import VenueSelect from '../components/VenueSelect.jsx';
 
 const CLASSIFICATIONS = ['A', 'B', 'C', 'D'];
 
@@ -41,7 +42,7 @@ function ProfileForm({ user, onSaved, setError, setSuccess }) {
       <label>Last name<input value={form.lastName} onChange={set('lastName')} required /></label>
       <label>Email<input type="email" value={form.email} onChange={set('email')} required /></label>
       <label>Phone <span className="muted">(optional)</span><input type="tel" value={form.phone} onChange={set('phone')} /></label>
-      <label>Venue<input value={form.venue} onChange={set('venue')} required /></label>
+      <label>Venue<VenueSelect value={form.venue} onChange={(name) => setForm({ ...form, venue: name })} /></label>
       <label>Team name<input value={form.teamName} onChange={set('teamName')} required /></label>
       <label>
         Classification <span className="muted">(optional)</span>

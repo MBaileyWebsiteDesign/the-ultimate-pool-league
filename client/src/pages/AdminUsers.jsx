@@ -26,7 +26,10 @@ export default function AdminUsers() {
     <div>
       <div className="page-header">
         <h1>Manage Users</h1>
-        <Link to="/admin/audit-log" className="btn">View Audit Log</Link>
+        <span className="inline-form" style={{ marginBottom: 0 }}>
+          <Link to="/admin/venues" className="btn">Manage Venues</Link>
+          <Link to="/admin/audit-log" className="btn">View Audit Log</Link>
+        </span>
       </div>
 
       <form className="inline-form" onSubmit={onSearch}>

@@ -17,6 +17,7 @@ import {
   hashPassword,
   verifyPassword,
   createUserToken,
+  verifyUserToken,
   publicUser,
   requireUser,
   requireAnyAuth,
@@ -113,6 +114,7 @@ app.post('/api/users/register', asyncRoute((req, res) => {
     createdAt: new Date().toISOString(),
   };
   db.users.push(user);
+  ensureVenue(db, user.venue, user.id, `${user.firstName} ${user.lastName}`);
   writeDb(db);
 
   const { token, expiresAt } = createUserToken(user.id);
@@ -150,6 +152,31 @@ function syncLinkedPlayerName(db, user) {
   if (player) player.name = `${user.firstName} ${user.lastName}`;
 }
 
+// Venues are a curated, admin-approved list, but a player shouldn't have to
+// stop and file a separate "request" before they can register or save their
+// profile - so setting `venue` to a name that isn't already known (whether at
+// registration or later editing, by the player themselves or an admin on
+// their behalf) implicitly creates a pending Venue entry for it. It's usable
+// as that player's own venue text immediately either way; approval only
+// gates whether it shows up in the shared dropdown for everyone else.
+function ensureVenue(db, venueName, requestedByUserId, requestedByName) {
+  const trimmed = venueName.trim();
+  const existing = db.venues.find((v) => v.name.toLowerCase() === trimmed.toLowerCase());
+  if (existing) return existing;
+  const venue = {
+    id: uuid(),
+    name: trimmed,
+    status: 'pending',
+    requestedBy: requestedByUserId,
+    requestedByName,
+    requestedAt: new Date().toISOString(),
+    approvedBy: null,
+    approvedAt: null,
+  };
+  db.venues.push(venue);
+  return venue;
+}
+
 function applyProfileFields(db, user, fields) {
   const { firstName, lastName, email, phone, venue, teamName, classification } = fields;
   if (firstName !== undefined) {
@@ -172,6 +199,7 @@ function applyProfileFields(db, user, fields) {
   if (venue !== undefined) {
     if (!venue || !venue.trim()) throw new ApiError(400, 'Venue is required');
     user.venue = venue.trim();
+    ensureVenue(db, user.venue, user.id, `${user.firstName} ${user.lastName}`);
   }
   if (teamName !== undefined) {
     if (!teamName || !teamName.trim()) throw new ApiError(400, 'Team name is required');
@@ -316,10 +344,33 @@ app.get('/api/divisions/:id', requireAnyAuth, asyncRoute((req, res) => {
 }));
 
 // ---- Singles players ----
+// Players are only ever registered `Users` now (see registeredPlayers()
+// below) - a captain picks a name from the list of people who've actually
+// signed up rather than typing an arbitrary free-text name. This keeps the
+// roster tied to real accounts instead of one-off placeholder names.
+
+// Every registered, active user has (via registration) a linked Player
+// record - this is the pool of names a captain/admin can pick from when
+// building a division roster or a team. Demo/seed players created directly
+// in db.players without a linked user (e.g. the seeded Premier League demo
+// data) are NOT included here, since they don't correspond to a real account.
+function registeredPlayers(db) {
+  const linkedPlayerIds = new Set(
+    db.users.filter((u) => u.status === 'active' && u.playerId).map((u) => u.playerId)
+  );
+  return db.players
+    .filter((p) => linkedPlayerIds.has(p.id))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+app.get('/api/registered-players', requireAnyAuth, asyncRoute((req, res) => {
+  const db = readDb();
+  res.json(registeredPlayers(db));
+}));
 
 app.post('/api/divisions/:id/players', asyncRoute((req, res) => {
-  const { name } = req.body;
-  if (!name || !name.trim()) throw new ApiError(400, 'Player name is required');
+  const { playerId } = req.body;
+  if (!playerId) throw new ApiError(400, 'playerId is required');
 
   const db = readDb();
   const division = db.divisions.find((d) => d.id === req.params.id);
@@ -329,11 +380,8 @@ app.post('/api/divisions/:id/players', asyncRoute((req, res) => {
     throw new ApiError(400, 'Cannot add players after fixtures have been generated for this division');
   }
 
-  let player = db.players.find((p) => p.name.toLowerCase() === name.trim().toLowerCase());
-  if (!player) {
-    player = { id: uuid(), name: name.trim() };
-    db.players.push(player);
-  }
+  const player = registeredPlayers(db).find((p) => p.id === playerId);
+  if (!player) throw new ApiError(400, 'Only registered, active users can be added as players - pick a name from the list');
   if (!division.playerIds.includes(player.id)) {
     division.playerIds.push(player.id);
   }
@@ -387,8 +435,8 @@ app.delete('/api/divisions/:id/teams/:teamId', asyncRoute((req, res) => {
 }));
 
 app.post('/api/teams/:teamId/players', asyncRoute((req, res) => {
-  const { name } = req.body;
-  if (!name || !name.trim()) throw new ApiError(400, 'Player name is required');
+  const { playerId } = req.body;
+  if (!playerId) throw new ApiError(400, 'playerId is required');
 
   const db = readDb();
   const team = db.teams.find((t) => t.id === req.params.teamId);
@@ -398,11 +446,8 @@ app.post('/api/teams/:teamId/players', asyncRoute((req, res) => {
     throw new ApiError(400, 'Cannot add players once fixtures have been generated for this division');
   }
 
-  let player = db.players.find((p) => p.name.toLowerCase() === name.trim().toLowerCase());
-  if (!player) {
-    player = { id: uuid(), name: name.trim() };
-    db.players.push(player);
-  }
+  const player = registeredPlayers(db).find((p) => p.id === playerId);
+  if (!player) throw new ApiError(400, 'Only registered, active users can be added as players - pick a name from the list');
   if (!team.playerIds.includes(player.id)) {
     team.playerIds.push(player.id);
   }
@@ -1007,6 +1052,75 @@ app.get('/api/admin/audit-log', requireAdminRole, asyncRoute((req, res) => {
   const db = readDb();
   const entries = [...db.auditLog].reverse().slice(0, 200);
   res.json(entries);
+}));
+
+// ---------- Venues ----------
+// A curated, admin-approved list of venues, seeded with a starter set (see
+// services/seed.js). New venue names typed at registration or in profile
+// edits are auto-queued as `pending` (see ensureVenue above) rather than
+// requiring a separate submission step; admins approve or reject them from
+// here. Deliberately public/no-login-required for GET, since the
+// registration form (before an account exists) needs the approved list too.
+
+app.get('/api/venues', asyncRoute((req, res) => {
+  const db = readDb();
+  const approved = db.venues
+    .filter((v) => v.status === 'approved')
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : null;
+  const session = token ? verifyUserToken(token) : null;
+  const mine = session
+    ? db.venues.filter((v) => v.requestedBy === session.userId && v.status !== 'approved')
+    : [];
+
+  res.json({ approved, mine });
+}));
+
+app.get('/api/admin/venues', requireAdminRole, asyncRoute((req, res) => {
+  const db = readDb();
+  const statusOrder = { pending: 0, approved: 1, rejected: 2 };
+  const venues = [...db.venues].sort((a, b) =>
+    statusOrder[a.status] - statusOrder[b.status] || a.name.localeCompare(b.name)
+  );
+  res.json(venues);
+}));
+
+app.post('/api/admin/venues/:id/approve', requireAdminRole, asyncRoute((req, res) => {
+  const db = readDb();
+  const venue = db.venues.find((v) => v.id === req.params.id);
+  if (!venue) throw new ApiError(404, 'Venue not found');
+  venue.status = 'approved';
+  venue.approvedBy = req.adminSession.label;
+  venue.approvedAt = new Date().toISOString();
+  recordAudit(db, {
+    actor: req.adminSession.label,
+    action: 'venue.approve',
+    targetType: 'venue',
+    targetId: venue.id,
+    details: `Approved venue "${venue.name}"`,
+  });
+  writeDb(db);
+  res.json(venue);
+}));
+
+app.post('/api/admin/venues/:id/reject', requireAdminRole, asyncRoute((req, res) => {
+  const db = readDb();
+  const venue = db.venues.find((v) => v.id === req.params.id);
+  if (!venue) throw new ApiError(404, 'Venue not found');
+  venue.status = 'rejected';
+  venue.approvedBy = req.adminSession.label;
+  venue.approvedAt = new Date().toISOString();
+  recordAudit(db, {
+    actor: req.adminSession.label,
+    action: 'venue.reject',
+    targetType: 'venue',
+    targetId: venue.id,
+    details: `Rejected venue "${venue.name}"`,
+  });
+  writeDb(db);
+  res.json(venue);
 }));
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));

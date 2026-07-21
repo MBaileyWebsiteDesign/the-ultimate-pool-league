@@ -4,8 +4,8 @@ import { getStoredPlayerToken } from './PlayerAuthContext.jsx';
 const BASE = '/api';
 
 async function request(path, options = {}) {
-  // Prefer the admin token when both exist - an admin session can do
-  // everything a player session can (browsing), plus admin-only actions.
+  // Admin and player sessions are mutually exclusive (see sessionBus.js), so
+  // at most one of these two is ever set - this just reads whichever exists.
   const token = getStoredToken() || getStoredPlayerToken();
   const res = await fetch(`${BASE}${path}`, {
     headers: {
@@ -45,6 +45,12 @@ export const api = {
     request(`/admin/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({ newPassword }) }),
   adminGetAuditLog: () => request('/admin/audit-log'),
 
+  // Venues
+  getVenues: () => request('/venues'),
+  adminListVenues: () => request('/admin/venues'),
+  adminApproveVenue: (id) => request(`/admin/venues/${id}/approve`, { method: 'POST' }),
+  adminRejectVenue: (id) => request(`/admin/venues/${id}/reject`, { method: 'POST' }),
+
   // Admin: score override
   overrideFixture: (fixtureId, homeScore, awayScore) =>
     request(`/fixtures/${fixtureId}/override`, { method: 'POST', body: JSON.stringify({ homeScore, awayScore }) }),
@@ -56,8 +62,9 @@ export const api = {
   createDivision: (leagueId, data) =>
     request(`/leagues/${leagueId}/divisions`, { method: 'POST', body: JSON.stringify(data) }),
   getDivision: (id) => request(`/divisions/${id}`),
-  addPlayer: (divisionId, name) =>
-    request(`/divisions/${divisionId}/players`, { method: 'POST', body: JSON.stringify({ name }) }),
+  getRegisteredPlayers: () => request('/registered-players'),
+  addPlayer: (divisionId, playerId) =>
+    request(`/divisions/${divisionId}/players`, { method: 'POST', body: JSON.stringify({ playerId }) }),
   removePlayer: (divisionId, playerId) =>
     request(`/divisions/${divisionId}/players/${playerId}`, { method: 'DELETE' }),
   generateFixtures: (divisionId) =>
@@ -73,8 +80,8 @@ export const api = {
     request(`/divisions/${divisionId}/teams`, { method: 'POST', body: JSON.stringify({ name }) }),
   removeTeam: (divisionId, teamId) =>
     request(`/divisions/${divisionId}/teams/${teamId}`, { method: 'DELETE' }),
-  addTeamPlayer: (teamId, name) =>
-    request(`/teams/${teamId}/players`, { method: 'POST', body: JSON.stringify({ name }) }),
+  addTeamPlayer: (teamId, playerId) =>
+    request(`/teams/${teamId}/players`, { method: 'POST', body: JSON.stringify({ playerId }) }),
   removeTeamPlayer: (teamId, playerId) =>
     request(`/teams/${teamId}/players/${playerId}`, { method: 'DELETE' }),
 

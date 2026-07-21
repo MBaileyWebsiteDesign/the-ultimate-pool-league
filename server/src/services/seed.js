@@ -9,6 +9,24 @@ import { generateRoundRobin } from './roundRobin.js';
 resetDb();
 const db = readDb();
 
+// Seed a handful of pre-approved venues so registration/profile venue
+// dropdowns aren't empty on a fresh install. Players can request more from
+// the registration or account page; an admin approves them from there.
+const seedVenueNames = [
+  'The Cue Club', "Rack 'Em Sports Bar", 'The Green Baize', 'Corner Pocket Tavern', 'Break & Run Social Club',
+];
+const now = new Date().toISOString();
+db.venues.push(...seedVenueNames.map((name) => ({
+  id: uuid(),
+  name,
+  status: 'approved',
+  requestedBy: null,
+  requestedByName: null,
+  requestedAt: now,
+  approvedBy: 'Admin',
+  approvedAt: now,
+})));
+
 const league = {
   id: uuid(),
   name: 'Top Spin Singles',
@@ -107,3 +125,4 @@ console.log('Seeded "Top Spin Singles" league:');
 console.log(`  League ID: ${league.id}`);
 divisions.forEach((d) => console.log(`  - ${d.name} (${d.id})`));
 console.log(`Premier League has ${premierPlayers.length} demo players, fixtures generated, round 1 results recorded.`);
+console.log(`Seeded ${seedVenueNames.length} approved venues: ${seedVenueNames.join(', ')}`);

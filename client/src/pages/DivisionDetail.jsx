@@ -3,15 +3,18 @@ import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useSetBreadcrumbs } from '../BreadcrumbContext.jsx';
 
-function SinglesRoster({ division, onChange, setError }) {
-  const [playerName, setPlayerName] = useState('');
+function SinglesRoster({ division, registeredPlayers, onChange, setError }) {
+  const [playerId, setPlayerId] = useState('');
+  const alreadyIn = new Set(division.players.map((p) => p.id));
+  const available = registeredPlayers.filter((p) => !alreadyIn.has(p.id));
 
   const onAddPlayer = async (e) => {
     e.preventDefault();
+    if (!playerId) return;
     setError('');
     try {
-      await api.addPlayer(division.id, playerName);
-      setPlayerName('');
+      await api.addPlayer(division.id, playerId);
+      setPlayerId('');
       onChange();
     } catch (err) {
       setError(err.message);
@@ -33,15 +36,20 @@ function SinglesRoster({ division, onChange, setError }) {
       <h2>Players</h2>
       {!division.fixturesGenerated && (
         <form className="inline-form" onSubmit={onAddPlayer}>
-          <input
-            value={playerName}
-            onChange={(e) => setPlayerName(e.target.value)}
-            placeholder="Player name"
-            required
-          />
-          <button className="btn btn-primary" type="submit">Add Player</button>
+          <select value={playerId} onChange={(e) => setPlayerId(e.target.value)} required>
+            <option value="" disabled>
+              {available.length === 0 ? 'No registered players available' : 'Select a registered player…'}
+            </option>
+            {available.map((p) => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))}
+          </select>
+          <button className="btn btn-primary" type="submit" disabled={!playerId}>Add Player</button>
         </form>
       )}
+      <p className="muted" style={{ marginTop: -8, marginBottom: 12, fontSize: '0.8rem' }}>
+        Only people with a registered player account can be added - see "My Account" to register.
+      </p>
       <ul className="player-list">
         {division.players.map((p) => (
           <li key={p.id}>
@@ -70,9 +78,11 @@ function SinglesRoster({ division, onChange, setError }) {
   );
 }
 
-function TeamRoster({ division, onChange, setError }) {
+function TeamRoster({ division, registeredPlayers, onChange, setError }) {
   const [teamName, setTeamName] = useState('');
-  const [playerNames, setPlayerNames] = useState({}); // teamId -> draft player name
+  const [playerIds, setPlayerIds] = useState({}); // teamId -> selected registered playerId
+  // A player can only be on one roster within a division at a time.
+  const assignedElsewhere = new Set(division.teams.flatMap((t) => t.players.map((p) => p.id)));
 
   const onAddTeam = async (e) => {
     e.preventDefault();
@@ -98,10 +108,12 @@ function TeamRoster({ division, onChange, setError }) {
 
   const onAddTeamPlayer = async (e, teamId) => {
     e.preventDefault();
+    const selected = playerIds[teamId];
+    if (!selected) return;
     setError('');
     try {
-      await api.addTeamPlayer(teamId, playerNames[teamId] || '');
-      setPlayerNames((prev) => ({ ...prev, [teamId]: '' }));
+      await api.addTeamPlayer(teamId, selected);
+      setPlayerIds((prev) => ({ ...prev, [teamId]: '' }));
       onChange();
     } catch (err) {
       setError(err.message);
@@ -124,6 +136,9 @@ function TeamRoster({ division, onChange, setError }) {
   return (
     <section className="card">
       <h2>Teams</h2>
+      <p className="muted" style={{ marginTop: -8, marginBottom: 12, fontSize: '0.8rem' }}>
+        Only people with a registered player account can be added to a team roster.
+      </p>
       {!division.fixturesGenerated && (
         <form className="inline-form" onSubmit={onAddTeam}>
           <input
@@ -156,17 +171,26 @@ function TeamRoster({ division, onChange, setError }) {
               ))}
               {team.players.length === 0 && <li className="muted">No players yet</li>}
             </ul>
-            {!division.fixturesGenerated && (
-              <form className="inline-form" onSubmit={(e) => onAddTeamPlayer(e, team.id)}>
-                <input
-                  value={playerNames[team.id] || ''}
-                  onChange={(e) => setPlayerNames((prev) => ({ ...prev, [team.id]: e.target.value }))}
-                  placeholder="Player name"
-                  required
-                />
-                <button className="btn btn-primary" type="submit">Add</button>
-              </form>
-            )}
+            {!division.fixturesGenerated && (() => {
+              const teamAvailable = registeredPlayers.filter((p) => !assignedElsewhere.has(p.id));
+              return (
+                <form className="inline-form" onSubmit={(e) => onAddTeamPlayer(e, team.id)}>
+                  <select
+                    value={playerIds[team.id] || ''}
+                    onChange={(e) => setPlayerIds((prev) => ({ ...prev, [team.id]: e.target.value }))}
+                    required
+                  >
+                    <option value="" disabled>
+                      {teamAvailable.length === 0 ? 'No registered players available' : 'Select a registered player…'}
+                    </option>
+                    {teamAvailable.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                  <button className="btn btn-primary" type="submit" disabled={!playerIds[team.id]}>Add</button>
+                </form>
+              );
+            })()}
           </div>
         ))}
         {division.teams.length === 0 && <p className="muted">No teams registered yet</p>}
@@ -191,12 +215,14 @@ function TeamRoster({ division, onChange, setError }) {
 export default function DivisionDetail() {
   const { divisionId } = useParams();
   const [division, setDivision] = useState(null);
+  const [registeredPlayers, setRegisteredPlayers] = useState([]);
   const [error, setError] = useState('');
 
   const load = () => api.getDivision(divisionId).then(setDivision).catch((e) => setError(e.message));
 
   useEffect(() => {
     load();
+    api.getRegisteredPlayers().then(setRegisteredPlayers).catch((e) => setError(e.message));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [divisionId]);
 
@@ -231,9 +257,9 @@ export default function DivisionDetail() {
       {error && <p className="error">{error}</p>}
 
       {isTeams ? (
-        <TeamRoster division={division} onChange={load} setError={setError} />
+        <TeamRoster division={division} registeredPlayers={registeredPlayers} onChange={load} setError={setError} />
       ) : (
-        <SinglesRoster division={division} onChange={load} setError={setError} />
+        <SinglesRoster division={division} registeredPlayers={registeredPlayers} onChange={load} setError={setError} />
       )}
 
       <section className="card">

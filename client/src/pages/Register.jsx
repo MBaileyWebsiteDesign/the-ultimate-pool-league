@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../api.js';
 import { usePlayerAuth } from '../PlayerAuthContext.jsx';
+import VenueSelect from '../components/VenueSelect.jsx';
 
 const CLASSIFICATIONS = ['A', 'B', 'C', 'D'];
 
@@ -65,7 +66,7 @@ export default function Register() {
         </label>
         <label>
           Venue
-          <input value={form.venue} onChange={set('venue')} placeholder="Home venue / club" required />
+          <VenueSelect value={form.venue} onChange={(name) => setForm({ ...form, venue: name })} />
         </label>
         <label>
           Team name
