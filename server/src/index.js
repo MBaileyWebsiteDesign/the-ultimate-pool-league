@@ -1013,19 +1013,38 @@ app.post('/api/fixtures/:id/override', requireAdmin, asyncRoute((req, res) => {
 // recorded), is left exactly as it is so history/stats aren't disturbed -
 // those in-progress fixtures are reported back separately so the admin
 // knows they still reference the outgoing player and need to be finished or
-// overridden first if they should change hands too. The outgoing player
-// stays on the division's roster (their played-so-far record keeps showing
-// in standings and their profile); the incoming player is added alongside
-// them, not swapped in for them, since their history is a separate thing.
+// overridden first if they should change hands too.
+//
+// `reason` distinguishes two situations that reassign fixtures identically
+// but differ in one way: whether the outgoing player still belongs on the
+// division's roster afterwards.
+//   - 'substitution' (default): a like-for-like swap - the outgoing player
+//     stays on the roster (their played-so-far record keeps showing in the
+//     League Table and their profile); the incoming player is added
+//     alongside them, not swapped in for them, since their history is a
+//     separate thing.
+//   - 'retirement': the outgoing player is leaving the league, not being
+//     temporarily covered for. Their remaining fixtures are handed over
+//     exactly the same way, but they're also removed from
+//     division.playerIds, so their row disappears from the League Table
+//     going forward. Matches they already completed are untouched, so
+//     opponents' won/lost/frame counts from those games still stand -
+//     computeStandings derives every row purely from that row's own
+//     fixtures, so removing the retiree from playerIds only removes their
+//     own row, it doesn't touch anyone else's numbers. Their full match
+//     history still shows on their own player profile page regardless.
 // There's no "reset scores and start the incoming player from zero" option
 // yet - that's a bigger, separate feature if it's ever needed.
 app.post('/api/divisions/:id/substitute-player', requireAdmin, asyncRoute((req, res) => {
-  const { outgoingPlayerId, incomingPlayerId } = req.body;
+  const { outgoingPlayerId, incomingPlayerId, reason = 'substitution' } = req.body;
   if (!outgoingPlayerId || !incomingPlayerId) {
     throw new ApiError(400, 'outgoingPlayerId and incomingPlayerId are required');
   }
   if (outgoingPlayerId === incomingPlayerId) {
     throw new ApiError(400, 'The replacement must be a different player from the one dropping out');
+  }
+  if (!['substitution', 'retirement'].includes(reason)) {
+    throw new ApiError(400, "reason must be 'substitution' or 'retirement'");
   }
 
   const db = readDb();
@@ -1066,6 +1085,9 @@ app.post('/api/divisions/:id/substitute-player', requireAdmin, asyncRoute((req, 
   }
 
   division.playerIds.push(incomingPlayerId);
+  if (reason === 'retirement') {
+    division.playerIds = division.playerIds.filter((id) => id !== outgoingPlayerId);
+  }
   if (!division.substitutions) division.substitutions = [];
   division.substitutions.push({
     id: uuid(),
@@ -1073,6 +1095,7 @@ app.post('/api/divisions/:id/substitute-player', requireAdmin, asyncRoute((req, 
     outgoingPlayerName: outgoing ? outgoing.name : 'Unknown player',
     incomingPlayerId,
     incomingPlayerName: incoming.name,
+    reason,
     at: new Date().toISOString(),
     by: req.adminSession.label,
     fixturesSwapped: swapped.length,
@@ -1083,11 +1106,13 @@ app.post('/api/divisions/:id/substitute-player', requireAdmin, asyncRoute((req, 
     action: 'division.substitute_player',
     targetType: 'division',
     targetId: division.id,
-    details: `Swapped ${outgoing ? outgoing.name : 'a player'} out for ${incoming.name} in "${division.name}" (${swapped.length} remaining fixture(s) reassigned)`,
+    details: reason === 'retirement'
+      ? `${outgoing ? outgoing.name : 'A player'} retired from "${division.name}" - removed from the League Table, ${incoming.name} took over ${swapped.length} remaining fixture(s)`
+      : `Swapped ${outgoing ? outgoing.name : 'a player'} out for ${incoming.name} in "${division.name}" (${swapped.length} remaining fixture(s) reassigned)`,
   });
 
   writeDb(db);
-  res.json({ division: hydrateDivision(db, division), swapped, blockedInProgress });
+  res.json({ division: hydrateDivision(db, division), swapped, blockedInProgress, reason });
 }));
 
 // ---------- Players ----------
