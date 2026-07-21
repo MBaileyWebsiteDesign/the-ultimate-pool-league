@@ -84,7 +84,10 @@ full-featured competition management that Wix has no built-in system for.
 - **Admin user management**: admins get a searchable list of every registered user,
   clickable through to an edit screen where they can update any profile field,
   grant/revoke admin rights, mark/unmark someone as captain, suspend/reactivate the
-  account, and force-set a new password without knowing the old one.
+  account, and force-set a new password without knowing the old one — plus a bulk-add
+  panel right on the Manage Users page for onboarding a batch of players by CSV/Excel
+  upload (with a downloadable template) or one at a time. See **Admin permission
+  management** below.
 - **Admin score override**: admins can directly correct a fixture's final score at any
   time, bypassing frame-by-frame play — useful for fixing a scoring mistake after the
   fact. It's blocked only when changing the *winner* would silently corrupt a knockout
@@ -141,11 +144,11 @@ Registration collects:
 
 Passwords are salted and hashed with Node's built-in `crypto.scrypt` (never stored in
 plaintext), and login issues an HMAC-signed token (24-hour expiry) stored in the
-browser's `localStorage`. Every account — self-registered or admin-created via the
-Season Setup Wizard's CSV/Excel import — lives in the same `db.users` table and is
-auto-linked (by matching name) to a `Player` roster entry where one exists, powering the
-"view my stats" link on the account page and letting admins add them to a division or
-team roster.
+browser's `localStorage`. Every account — self-registered or admin-created via bulk
+import or the Season Setup Wizard's CSV/Excel import — lives in the same `db.users`
+table and is auto-linked (by matching name) to a `Player` roster entry where one exists,
+powering the "view my stats" link on the account page and letting admins add them to a
+division or team roster.
 
 Logged-in users manage their own account from "My Account" (click their name, top
 right) — the Player Management Portal described above.
@@ -159,6 +162,15 @@ From the Admin Portal → "Manage Users", an admin can:
 - Mark or unmark any account as a captain (`isCaptain`).
 - Suspend an account (blocks that account's login immediately) or reactivate it.
 - Force-set a new password for a user without needing their current one.
+- **Bulk-add users** ("Bulk Add Users" panel at the top of the Manage Users page — click
+  "Upload CSV / Excel or add players" to expand it) — download a CSV or Excel template,
+  fill in a row per player, and upload it back; or add players one at a time with the
+  same fields. This creates accounts only, with no season/division attached (add them to
+  a specific roster afterwards from that division's page) - for standing up a whole new
+  season (leagues + rosters + fixtures) in one guided flow, use the Season Setup Wizard
+  instead. Each new account gets a random temporary password, shown once in the result
+  so it can be handed to that player; a row whose email already has an account is
+  skipped rather than duplicated or overwritten.
 - Review the audit log of every admin action taken (who did what, and when).
 
 ## Season Setup Wizard
@@ -197,6 +209,12 @@ of its "leagues" is a `Division` (singles, round-robin) — so everything built 
 wizard immediately gets the same standings, fixtures and scoring UI as a league built by
 hand.
 
+Note: this CSV/Excel import is scoped to one season's divisions (the `division` column
+must match one of that season's league names). To bulk-add players without picking a
+season/division up front, use the separate "Bulk Add Users" panel on the Manage Users
+page instead (see **Admin permission management** above) — it has its own template and
+just creates accounts, which you then add to whichever roster you like afterwards.
+
 ## Venues
 
 Every player's "home venue" is chosen from a shared, admin-approved list rather than free
@@ -218,7 +236,7 @@ pool-league/
   server/            Node.js + Express REST API
     src/
       index.js          Routes, static hosting of the built client, season wizard
-                         endpoints, fixture date scheduling
+                         endpoints, bulk user import, fixture date scheduling
       db.js              JSON-file persistence layer (see note below)
       userAuth.js        Unified account model: registration/login, password hashing,
                           temp password generation, requireAuth (any logged-in account)
@@ -238,8 +256,8 @@ pool-league/
     src/
       pages/                LeagueList, LeagueDetail, DivisionDetail, FixtureDetail,
                             PlayerProfile, Login, Register, PlayerPortal, CaptainPortal,
-                            AdminPortal, AdminSeasonWizard, AdminUsers, AdminUserEdit,
-                            AdminAuditLog, AdminVenues
+                            AdminPortal, AdminSeasonWizard, AdminUsers (includes the
+                            bulk-add panel), AdminUserEdit, AdminAuditLog, AdminVenues
       components/
         Breadcrumbs.jsx      Renders the shared breadcrumb trail
         VenueSelect.jsx      Venue dropdown + "not listed" free-text fallback
@@ -353,6 +371,7 @@ publish through Pages.
 | POST | `/api/admin/users/:id/permissions` | Set `isAdmin` and/or `isCaptain` on a user (requires admin; logged) |
 | POST | `/api/admin/users/:id/status` | Set a user's status to `active` or `suspended` (requires admin; logged) |
 | POST | `/api/admin/users/:id/reset-password` | Force-set a new password for a user (requires admin; logged) |
+| POST | `/api/admin/users/import` | Bulk-create user accounts by row (CSV/Excel/manual) from Manage Users, no season/division attached (requires admin; logged) |
 | GET | `/api/admin/audit-log` | Most recent 500 admin actions (requires admin) |
 | POST | `/api/admin/seasons` | Season Setup Wizard step 1–2: create a season (League) with N divisions (requires admin) |
 | POST | `/api/admin/seasons/:leagueId/import-players` | Season Setup Wizard step 3: bulk-import players by row (CSV/Excel/manual), creating accounts as needed (requires admin; logged) |
