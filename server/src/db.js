@@ -23,6 +23,7 @@ const EMPTY_STATE = {
   divisionPlayers: [],
   fixtures: [],
   users: [],
+  auditLog: [],
 };
 
 function ensureDataFile() {
@@ -36,9 +37,16 @@ export function readDb() {
   ensureDataFile();
   const raw = readFileSync(DATA_FILE, 'utf-8');
   const state = JSON.parse(raw);
-  // Backfill for databases created before `teams`/`users` existed.
+  // Backfill for databases created before `teams`/`users`/`auditLog` existed,
+  // and before users had role/status/playerId fields.
   if (!state.teams) state.teams = [];
   if (!state.users) state.users = [];
+  if (!state.auditLog) state.auditLog = [];
+  for (const user of state.users) {
+    if (!user.role) user.role = 'player';
+    if (!user.status) user.status = 'active';
+    if (user.playerId === undefined) user.playerId = null;
+  }
   return state;
 }
 

@@ -12,6 +12,7 @@
 import crypto from 'crypto';
 import { ApiError } from './errors.js';
 import { verifyToken as verifyAdminToken } from './auth.js';
+import { readDb } from './db.js';
 
 const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-only-secret-change-me';
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -74,14 +75,30 @@ export function publicUser(user) {
   return rest;
 }
 
+// Looks up the live user record behind a verified token - role and
+// suspension status can change after a token was issued (an admin can
+// promote/demote or suspend someone mid-session), so both are always read
+// fresh from the db rather than trusted from the token payload.
+function loadActiveUser(token) {
+  const session = verifyUserToken(token);
+  if (!session) return null;
+  const db = readDb();
+  const user = db.users.find((u) => u.id === session.userId);
+  if (!user) return null;
+  return user;
+}
+
 export function requireUser(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : null;
-  const session = verifyUserToken(token);
-  if (!session) {
+  const user = loadActiveUser(token);
+  if (!user) {
     throw new ApiError(401, 'Player login required for this action');
   }
-  req.playerSession = session;
+  if (user.status === 'suspended') {
+    throw new ApiError(403, 'This account has been suspended');
+  }
+  req.playerSession = { userId: user.id, user };
   next();
 }
 
@@ -99,11 +116,37 @@ export function requireAnyAuth(req, res, next) {
     return next();
   }
 
-  const playerSession = verifyUserToken(token);
-  if (playerSession) {
-    req.session = { role: 'player', ...playerSession };
+  const user = loadActiveUser(token);
+  if (user && user.status !== 'suspended') {
+    req.session = { role: 'player', userId: user.id };
     return next();
   }
 
   throw new ApiError(401, 'Login required to view this');
+}
+
+// Admin panel / admin-only-action gate: accepts EITHER the single hardcoded
+// super-admin account (auth.js) OR a player account that's been promoted to
+// role: 'admin' (and isn't suspended). Both grant full admin capability -
+// there's no tiered admin permission model in this v1, a promoted admin can
+// do everything the super-admin can (including promote/demote/suspend other
+// accounts). req.adminSession.label is a human-readable actor name for audit
+// log entries.
+export function requireAdminRole(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : null;
+
+  const superSession = verifyAdminToken(token);
+  if (superSession) {
+    req.adminSession = { type: 'super', label: 'Admin' };
+    return next();
+  }
+
+  const user = loadActiveUser(token);
+  if (user && user.role === 'admin' && user.status !== 'suspended') {
+    req.adminSession = { type: 'user', userId: user.id, label: `${user.firstName} ${user.lastName}` };
+    return next();
+  }
+
+  throw new ApiError(403, 'Admin access required');
 }
