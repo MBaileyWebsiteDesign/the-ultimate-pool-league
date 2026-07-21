@@ -1,6 +1,73 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
+import { useSetBreadcrumbs } from '../BreadcrumbContext.jsx';
+import { useIsAdminSession } from '../useAdminSession.js';
+
+function AdminOverridePanel({ fixture, isTeams, onChange }) {
+  const homeName = isTeams ? fixture.homeTeam?.name : fixture.homePlayer?.name;
+  const awayName = isTeams ? fixture.awayTeam?.name : fixture.awayPlayer?.name;
+  const [homeScore, setHomeScore] = useState(String(isTeams ? fixture.homeLegsWon ?? 0 : fixture.homeFrameScore ?? 0));
+  const [awayScore, setAwayScore] = useState(String(isTeams ? fixture.awayLegsWon ?? 0 : fixture.awayFrameScore ?? 0));
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [open, setOpen] = useState(false);
+
+  if (!fixture.bothEntrantsKnown) return null;
+
+  const onSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    setSuccess('');
+    setSubmitting(true);
+    try {
+      await api.overrideFixture(fixture.id, Number(homeScore), Number(awayScore));
+      setSuccess('Result overridden.');
+      onChange();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="card">
+      <div className="page-header">
+        <h2 style={{ margin: 0 }}>Admin: Override Result</h2>
+        <button className="btn" type="button" onClick={() => setOpen((o) => !o)}>
+          {open ? 'Hide' : 'Show'}
+        </button>
+      </div>
+      {open && (
+        <>
+          <p className="muted">
+            Directly sets the final score, bypassing frame-by-frame play. Use to correct mistakes.
+            {fixture.adminOverride && (
+              <> Last overridden by <strong>{fixture.adminOverride.by}</strong> at {new Date(fixture.adminOverride.at).toLocaleString()}.</>
+            )}
+          </p>
+          <form className="inline-form" onSubmit={onSubmit}>
+            <label>
+              {homeName || 'Home'}
+              <input type="number" min="0" value={homeScore} onChange={(e) => setHomeScore(e.target.value)} required />
+            </label>
+            <label>
+              {awayName || 'Away'}
+              <input type="number" min="0" value={awayScore} onChange={(e) => setAwayScore(e.target.value)} required />
+            </label>
+            <button className="btn btn-primary" type="submit" disabled={submitting}>
+              {submitting ? 'Saving…' : 'Override Score'}
+            </button>
+          </form>
+          {error && <p className="error">{error}</p>}
+          {success && <p className="banner banner-success">{success}</p>}
+        </>
+      )}
+    </section>
+  );
+}
 
 function LegNominationForm({ fixture, leg, onChange, setError }) {
   const [homePlayerId, setHomePlayerId] = useState('');
@@ -242,6 +309,7 @@ export default function FixtureDetail() {
   const { fixtureId } = useParams();
   const [fixture, setFixture] = useState(null);
   const [error, setError] = useState('');
+  const isAdminSession = useIsAdminSession();
 
   const load = () => api.getFixture(fixtureId).then(setFixture).catch((e) => setError(e.message));
 
@@ -249,6 +317,12 @@ export default function FixtureDetail() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fixtureId]);
+
+  useSetBreadcrumbs(
+    fixture
+      ? [{ label: 'Home', to: '/' }, { label: fixture.divisionName || 'Division', to: `/divisions/${fixture.divisionId}` }, { label: `Round ${fixture.round}` }]
+      : [{ label: 'Home', to: '/' }, { label: 'Loading…' }]
+  );
 
   if (!fixture) return <p>Loading…</p>;
 
@@ -268,6 +342,8 @@ export default function FixtureDetail() {
       ) : (
         <SinglesFixtureView fixture={fixture} onChange={load} setError={setError} />
       )}
+
+      {isAdminSession && <AdminOverridePanel fixture={fixture} isTeams={isTeams} onChange={load} />}
     </div>
   );
 }

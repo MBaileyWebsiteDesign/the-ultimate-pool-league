@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useAuth } from '../AuthContext.jsx';
+import { useSetBreadcrumbs } from '../BreadcrumbContext.jsx';
 
 export default function LeagueDetail() {
   const { isAdmin } = useAuth();
@@ -13,6 +14,12 @@ export default function LeagueDetail() {
   const [legsPerMatch, setLegsPerMatch] = useState(5);
   const [scheduling, setScheduling] = useState('round_robin_single');
   const [showForm, setShowForm] = useState(false);
+
+  useSetBreadcrumbs(
+    league
+      ? [{ label: 'Home', to: '/' }, { label: league.name }]
+      : [{ label: 'Home', to: '/' }, { label: 'Loading…' }]
+  );
 
   const load = () => api.getLeague(leagueId).then(setLeague).catch((e) => setError(e.message));
 

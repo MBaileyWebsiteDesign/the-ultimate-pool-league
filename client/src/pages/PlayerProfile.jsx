@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
+import { useSetBreadcrumbs } from '../BreadcrumbContext.jsx';
 
 export default function PlayerProfile() {
   const { playerId } = useParams();
@@ -10,6 +11,12 @@ export default function PlayerProfile() {
   useEffect(() => {
     api.getPlayerProfile(playerId).then(setProfile).catch((e) => setError(e.message));
   }, [playerId]);
+
+  useSetBreadcrumbs(
+    profile
+      ? [{ label: 'Home', to: '/' }, { label: profile.name }]
+      : [{ label: 'Home', to: '/' }, { label: 'Loading…' }]
+  );
 
   if (error) return <p className="error">{error}</p>;
   if (!profile) return <p>Loading…</p>;

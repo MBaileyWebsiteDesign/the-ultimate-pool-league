@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
+import { useSetBreadcrumbs } from '../BreadcrumbContext.jsx';
 
 function SinglesRoster({ division, onChange, setError }) {
   const [playerName, setPlayerName] = useState('');
@@ -198,6 +199,16 @@ export default function DivisionDetail() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [divisionId]);
+
+  useSetBreadcrumbs(
+    division
+      ? [
+          { label: 'Home', to: '/' },
+          { label: division.leagueName || 'League', to: `/leagues/${division.leagueId}` },
+          { label: division.name },
+        ]
+      : [{ label: 'Home', to: '/' }, { label: 'Loading…' }]
+  );
 
   if (!division) return <p>Loading…</p>;
 

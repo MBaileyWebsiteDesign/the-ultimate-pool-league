@@ -3,6 +3,9 @@ import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 import { useAuth } from '../AuthContext.jsx';
 
+// No breadcrumb here - this is the home page, so there's nothing useful to
+// show as a trail (the shared Breadcrumbs component renders nothing when no
+// page has set any crumbs, which is the desired look here).
 export default function LeagueList() {
   const { isAdmin } = useAuth();
   const [leagues, setLeagues] = useState([]);
