@@ -372,15 +372,45 @@ For frontend development with hot reload instead of a static build, run `npm run
 in `client/` (http://localhost:5173) instead of `npm run build`; the Vite dev server
 proxies `/api` requests to the Express server on port 4000, so run both at once.
 
-## Deployment note: this cannot be hosted on GitHub Pages
+## GitHub Pages: static demo build
 
 GitHub Pages only serves static files - it has no way to run the Express API server or
-persist the JSON database. This repo has Pages enabled at the repository level, but that
-setting has nothing published to it; visiting the Pages URL for this repo will not show a
-working app. To actually put this live, it needs a host that can run a Node.js process
-(Render, Railway, Fly.io, a VPS, etc.) - point that host at `server/` (after `npm run
-build` in `client/` so `client/dist` exists for it to serve) rather than trying to
-publish through Pages.
+persist the JSON database, so it can never host a real, working deployment of this app.
+What it *can* host is a **static demo build**: the real React UI, wired to an in-memory
+copy of the seeded dataset instead of a live backend, so every screen looks and behaves
+like the real thing without needing a server anywhere.
+
+- `client/src/demo/demoApi.js` is a drop-in stand-in for `client/src/api.js` - same
+method names, same request/response shapes - except every "request" runs the same logic
+as the matching Express route directly against an in-memory `db`, instead of doing a
+`fetch()`. `client/src/demo/logic/` holds the pure standings/bracket/round-robin/player-
+profile calculations, copied unmodified from `server/src/services/` (they have no
+Node-only dependencies, so they run in the browser as-is).
+- A visitor lands already "logged in" as the seeded demo admin account - there's no real
+password to check in a static bundle, so there's no login screen to get through. Changes
+(recording frames, generating fixtures, admin edits, running the Season Setup Wizard)
+actually happen and persist in that visitor's own browser (`localStorage`) for as long as
+they keep using it, but nobody else sees them and there's no way to reset short of
+clearing site data.
+- Routing uses a `HashRouter` in this build only (`client/src/main.jsx`), since Pages has
+no server-side rewrite rule to send a refreshed or directly-shared deep link back to
+`index.html` the way the Express server's catch-all route does for a real deployment.
+- `.github/workflows/deploy-demo.yml` builds and publishes this automatically on every
+push to `main` that touches `client/` or `server/`: it seeds a fresh dataset
+(`npm run seed` in `server/`), exports it for the client bundle
+(`server/scripts/export-demo-data.js` - strips the password hash, since it's never
+needed, and links the seeded admin account to the real "Matt Bailey" player so "My
+Account" has something to show), then runs `npm run build:demo` in `client/` (sets
+`VITE_DEMO_MODE=true`, which is what `api.js`, `AuthContext.jsx` and `vite.config.js` all
+branch on) and publishes the result via GitHub's official Pages Actions. The repository's
+Pages source is configured to build via that GitHub Actions workflow rather than any
+branch/folder.
+
+**This is a demo, not a deployment.** To actually run this app for real people to use, it
+needs a host that can run a Node.js process and keep `server/src/data/db.json` around
+between requests (Render, Railway, Fly.io, a VPS, etc.) - point that host at `server/`
+(after `npm run build` in `client/`, without `VITE_DEMO_MODE`, so `client/dist` exists for
+the Express server to serve) rather than Pages.
 
 ## API reference (summary)
 
@@ -448,15 +478,20 @@ publish through Pages.
 ## Seeded demo data
 
 Running `npm run seed` creates the **Top Spin Singles** league with six divisions
-(Premier League, Division 1–5), populates Premier League with 8 demo players, generates
-its full round-robin fixture list, and plays out round 1 with varied race-to-6
-scorelines (6–5, 6–0, 6–3, 6–4) so the standings table and scoring flow are visible
-immediately without any manual setup. It also seeds 5 pre-approved venues (The Cue Club,
-Rack 'Em Sports Bar, The Green Baize, Corner Pocket Tavern, Break & Run Social Club) and
-the default admin account (`admin@example.com` / `Admin12!@`) so the app is fully usable
-on a fresh install.
+(Premier League, Division 1–5), each populated with its real current-season 14-player
+roster (84 players total) and its full round-robin fixture list (91 fixtures per
+division) generated up front - but every fixture starts `scheduled` (no frames
+recorded), so standings begin at zero and build up through the normal scoring flow. A
+final standings table only records each player's aggregate played/won/lost/frames, not
+who played whom or in what order, so there's no way to reconstruct the real historical
+match-by-match results from it - seeding the real rosters with an empty fixture list
+gives a realistic dataset to test against without inventing results that never happened.
+It also seeds 5 pre-approved venues (The Cue Club, Rack 'Em Sports Bar, The Green Baize,
+Corner Pocket Tavern, Break & Run Social Club) and the default admin account
+(`admin@example.com` / `Admin12!@`) so the app is fully usable on a fresh install.
 
-Note: the 8 demo Premier League players are seeded directly (not linked to a registered
-user account), purely to make the standings/scoring demo visible out of the box - they
-predate, and are an exception to, the "players must be registered users" rule described
-above, which only applies to rosters built going forward through the app itself.
+Note: all 84 seeded players are created directly (not linked to a registered user
+account), purely so every division has a full roster to test against out of the box -
+they predate, and are an exception to, the "players must be registered users" rule
+described above, which only applies to rosters built going forward through the app
+itself.

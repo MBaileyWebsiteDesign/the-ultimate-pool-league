@@ -1,4 +1,13 @@
 import { getStoredToken } from './AuthContext.jsx';
+import { demoApi } from './demo/demoApi.js';
+
+// Static demo build (see vite.config.js / README "Deployment note"): with no
+// server to talk to on GitHub Pages, every method below is swapped for an
+// in-memory equivalent that runs the same logic against the bundled seed
+// data instead of making a real request - see client/src/demo/demoApi.js.
+// `VITE_DEMO_MODE` is only ever 'true' for the `npm run build:demo` build;
+// a normal `npm run build`/`npm run dev` always uses the real network api.
+const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true';
 
 const BASE = '/api';
 
@@ -18,7 +27,7 @@ async function request(path, options = {}) {
   return body;
 }
 
-export const api = {
+const networkApi = {
   // Single unified login for every account (admin, player, captain - any
   // combination of flags on the same account).
   login: (email, password) =>
@@ -111,3 +120,5 @@ export const api = {
 
   getPlayerProfile: (playerId) => request(`/players/${playerId}`),
 };
+
+export const api = DEMO_MODE ? demoApi : networkApi;

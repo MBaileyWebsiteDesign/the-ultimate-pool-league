@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useCallback } from 'react';
+import { getDemoSession } from './demo/demoApi.js';
 
 // One account, one login, one session - `isAdmin` and `isCaptain` are just
 // flags on the logged-in user rather than a separate identity/session (there
@@ -8,7 +9,15 @@ import { createContext, useContext, useState, useCallback } from 'react';
 const AuthContext = createContext(null);
 const STORAGE_KEY = 'poolLeagueSession';
 
+// Static demo build (see api.js / vite.config.js): there's no real login to
+// wait on, so a visitor lands already signed in as the seeded demo admin
+// instead of hitting a login screen first - the whole point is to show the
+// app itself, not a login form for an account nobody but this browser tab
+// can use.
+const DEMO_MODE = import.meta.env.VITE_DEMO_MODE === 'true';
+
 function loadStoredSession() {
+  if (DEMO_MODE) return getDemoSession();
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
