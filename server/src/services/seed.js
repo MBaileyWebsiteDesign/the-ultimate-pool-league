@@ -5,6 +5,7 @@
 import { v4 as uuid } from 'uuid';
 import { resetDb, readDb, writeDb } from '../db.js';
 import { generateRoundRobin } from './roundRobin.js';
+import { hashPassword } from '../userAuth.js';
 
 resetDb();
 const db = readDb();
@@ -26,6 +27,30 @@ db.venues.push(...seedVenueNames.map((name) => ({
   approvedBy: 'Admin',
   approvedAt: now,
 })));
+
+// Seed one admin account - login is unified now (no separate hardcoded admin
+// login), so a real account with isAdmin: true has to exist for anyone to
+// reach the admin portal on a fresh install. Change this password (or use
+// "Force Password Reset" from Manage Users) before deploying anywhere real
+// people can reach it.
+const ADMIN_EMAIL = 'admin@example.com';
+const ADMIN_PASSWORD = 'Admin12!@';
+db.users.push({
+  id: uuid(),
+  firstName: 'League',
+  lastName: 'Admin',
+  email: ADMIN_EMAIL,
+  passwordHash: hashPassword(ADMIN_PASSWORD),
+  phone: '',
+  venue: seedVenueNames[0],
+  teamName: 'Admin',
+  classification: null,
+  isAdmin: true,
+  isCaptain: false,
+  status: 'active',
+  playerId: null,
+  createdAt: now,
+});
 
 const league = {
   id: uuid(),
@@ -126,3 +151,4 @@ console.log(`  League ID: ${league.id}`);
 divisions.forEach((d) => console.log(`  - ${d.name} (${d.id})`));
 console.log(`Premier League has ${premierPlayers.length} demo players, fixtures generated, round 1 results recorded.`);
 console.log(`Seeded ${seedVenueNames.length} approved venues: ${seedVenueNames.join(', ')}`);
+console.log(`Seeded admin account: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD} (change this before deploying anywhere real people can reach it)`);
