@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { api } from '../api.js';
+import { useAuth } from '../AuthContext.jsx';
 import { useSetBreadcrumbs } from '../BreadcrumbContext.jsx';
 
 function SinglesRoster({ division, registeredPlayers, onChange, setError }) {
@@ -73,6 +74,102 @@ function SinglesRoster({ division, registeredPlayers, onChange, setError }) {
         </button>
       ) : (
         <p className="muted">Fixtures generated — player list is locked.</p>
+      )}
+    </section>
+  );
+}
+
+// Admin-only tool for handling a player dropping out mid-season: pick who's
+// leaving and who's replacing them, and every fixture of theirs that hasn't
+// been played yet gets handed to the replacement. Completed fixtures (and
+// any that already have some frames recorded) are left untouched - the
+// outgoing player's record up to that point stays exactly as it was, it just
+// stops growing, while the incoming player picks up from there. Only shown
+// once fixtures exist to reassign; before that, dropping someone and adding
+// someone else through the roster list above does the same thing more
+// directly.
+function PlayerSubstitutionPanel({ division, registeredPlayers, onChange, setError }) {
+  const [outgoingId, setOutgoingId] = useState('');
+  const [incomingId, setIncomingId] = useState('');
+  const [result, setResult] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const alreadyIn = new Set(division.players.map((p) => p.id));
+  const available = registeredPlayers.filter((p) => !alreadyIn.has(p.id));
+
+  const onSubmit = async (e) => {
+    e.preventDefault();
+    if (!outgoingId || !incomingId) return;
+    setError('');
+    setResult(null);
+    setSubmitting(true);
+    try {
+      const res = await api.substitutePlayer(division.id, outgoingId, incomingId);
+      setResult(res);
+      setOutgoingId('');
+      setIncomingId('');
+      onChange();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="card">
+      <h2>Substitute a Player</h2>
+      <p className="muted" style={{ marginTop: -8, marginBottom: 12, fontSize: '0.8rem' }}>
+        If a player drops out, swap them for a replacement here. Completed matches (and any
+        already partway through) are left exactly as they are - only the outgoing player's
+        remaining, not-yet-started fixtures move to the replacement.
+      </p>
+      <form className="inline-form" onSubmit={onSubmit}>
+        <select value={outgoingId} onChange={(e) => setOutgoingId(e.target.value)} required>
+          <option value="" disabled>Player dropping out…</option>
+          {division.players.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        <select value={incomingId} onChange={(e) => setIncomingId(e.target.value)} required>
+          <option value="" disabled>
+            {available.length === 0 ? 'No registered players available' : 'Replacement player…'}
+          </option>
+          {available.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        <button className="btn btn-primary" type="submit" disabled={!outgoingId || !incomingId || submitting}>
+          {submitting ? 'Swapping…' : 'Swap Player'}
+        </button>
+      </form>
+
+      {result && (
+        <div className="banner banner-success" style={{ marginTop: 12 }}>
+          <p style={{ margin: 0 }}>
+            {result.swapped.length} remaining fixture{result.swapped.length === 1 ? '' : 's'} reassigned to the replacement.
+            {result.blockedInProgress.length > 0 && (
+              <>
+                {' '}{result.blockedInProgress.length} fixture{result.blockedInProgress.length === 1 ? '' : 's'} already had frames
+                recorded and were left with the outgoing player - finish or override those first if they need to change hands too.
+              </>
+            )}
+          </p>
+        </div>
+      )}
+
+      {division.substitutions && division.substitutions.length > 0 && (
+        <>
+          <h3 style={{ fontSize: '1rem', color: 'var(--muted)', marginTop: 16 }}>Substitution history</h3>
+          <ul className="fixture-list">
+            {division.substitutions.map((s) => (
+              <li key={s.id}>
+                <span>{s.outgoingPlayerName} &rarr; {s.incomingPlayerName} ({s.fixturesSwapped} fixture{s.fixturesSwapped === 1 ? '' : 's'})</span>
+                <span className="muted">{new Date(s.at).toLocaleDateString()} · {s.by}</span>
+              </li>
+            ))}
+          </ul>
+        </>
       )}
     </section>
   );
@@ -214,6 +311,7 @@ function TeamRoster({ division, registeredPlayers, onChange, setError }) {
 
 export default function DivisionDetail() {
   const { divisionId } = useParams();
+  const { isAdmin } = useAuth();
   const [division, setDivision] = useState(null);
   const [registeredPlayers, setRegisteredPlayers] = useState([]);
   const [error, setError] = useState('');
@@ -260,6 +358,10 @@ export default function DivisionDetail() {
         <TeamRoster division={division} registeredPlayers={registeredPlayers} onChange={load} setError={setError} />
       ) : (
         <SinglesRoster division={division} registeredPlayers={registeredPlayers} onChange={load} setError={setError} />
+      )}
+
+      {isAdmin && !isTeams && division.fixturesGenerated && (
+        <PlayerSubstitutionPanel division={division} registeredPlayers={registeredPlayers} onChange={load} setError={setError} />
       )}
 
       <section className="card">

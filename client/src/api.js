@@ -74,6 +74,11 @@ export const api = {
     request(`/divisions/${divisionId}/players/${playerId}`, { method: 'DELETE' }),
   generateFixtures: (divisionId, data = {}) =>
     request(`/divisions/${divisionId}/generate-fixtures`, { method: 'POST', body: JSON.stringify(data) }),
+  substitutePlayer: (divisionId, outgoingPlayerId, incomingPlayerId) =>
+    request(`/divisions/${divisionId}/substitute-player`, {
+      method: 'POST',
+      body: JSON.stringify({ outgoingPlayerId, incomingPlayerId }),
+    }),
 
   getFixture: (id) => request(`/fixtures/${id}`),
   recordFrame: (fixtureId, winnerPlayerId) =>

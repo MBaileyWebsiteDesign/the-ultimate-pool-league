@@ -1005,6 +1005,91 @@ app.post('/api/fixtures/:id/override', requireAdmin, asyncRoute((req, res) => {
   res.json(fixture);
 }));
 
+// ---------- Admin: mid-season player substitution ----------
+// Lets an admin swap a player out for a replacement in a singles division
+// when someone drops out. The incoming player takes over every fixture that
+// hasn't been played yet at all (status 'scheduled'); anything already
+// completed, or already partway through (status 'in_progress' - some frames
+// recorded), is left exactly as it is so history/stats aren't disturbed -
+// those in-progress fixtures are reported back separately so the admin
+// knows they still reference the outgoing player and need to be finished or
+// overridden first if they should change hands too. The outgoing player
+// stays on the division's roster (their played-so-far record keeps showing
+// in standings and their profile); the incoming player is added alongside
+// them, not swapped in for them, since their history is a separate thing.
+// There's no "reset scores and start the incoming player from zero" option
+// yet - that's a bigger, separate feature if it's ever needed.
+app.post('/api/divisions/:id/substitute-player', requireAdmin, asyncRoute((req, res) => {
+  const { outgoingPlayerId, incomingPlayerId } = req.body;
+  if (!outgoingPlayerId || !incomingPlayerId) {
+    throw new ApiError(400, 'outgoingPlayerId and incomingPlayerId are required');
+  }
+  if (outgoingPlayerId === incomingPlayerId) {
+    throw new ApiError(400, 'The replacement must be a different player from the one dropping out');
+  }
+
+  const db = readDb();
+  const division = db.divisions.find((d) => d.id === req.params.id);
+  if (!division) throw new ApiError(404, 'Division not found');
+  if (division.entryType !== 'singles') {
+    throw new ApiError(400, 'Player substitution is only available for singles divisions right now');
+  }
+  if (!division.playerIds.includes(outgoingPlayerId)) {
+    throw new ApiError(400, 'That player is not registered in this division');
+  }
+  if (division.playerIds.includes(incomingPlayerId)) {
+    throw new ApiError(400, 'That replacement is already registered in this division');
+  }
+
+  const incoming = registeredPlayers(db).find((p) => p.id === incomingPlayerId);
+  if (!incoming) throw new ApiError(400, 'Only registered, active users can be added as players - pick a name from the list');
+  const outgoing = db.players.find((p) => p.id === outgoingPlayerId);
+
+  const divisionFixtures = db.fixtures.filter((f) => f.divisionId === division.id);
+  const swapped = [];
+  const blockedInProgress = [];
+
+  for (const fixture of divisionFixtures) {
+    const isHome = fixture.homePlayerId === outgoingPlayerId;
+    const isAway = fixture.awayPlayerId === outgoingPlayerId;
+    if (!isHome && !isAway) continue;
+
+    if (fixture.status === 'completed') continue; // already played - history stays as-is
+    if (fixture.status === 'in_progress') {
+      blockedInProgress.push({ fixtureId: fixture.id, round: fixture.round });
+      continue; // has frames already recorded against the outgoing player
+    }
+    // status === 'scheduled': nobody has played this yet, safe to hand over
+    if (isHome) fixture.homePlayerId = incomingPlayerId;
+    else fixture.awayPlayerId = incomingPlayerId;
+    swapped.push({ fixtureId: fixture.id, round: fixture.round });
+  }
+
+  division.playerIds.push(incomingPlayerId);
+  if (!division.substitutions) division.substitutions = [];
+  division.substitutions.push({
+    id: uuid(),
+    outgoingPlayerId,
+    outgoingPlayerName: outgoing ? outgoing.name : 'Unknown player',
+    incomingPlayerId,
+    incomingPlayerName: incoming.name,
+    at: new Date().toISOString(),
+    by: req.adminSession.label,
+    fixturesSwapped: swapped.length,
+  });
+
+  recordAudit(db, {
+    actor: req.adminSession.label,
+    action: 'division.substitute_player',
+    targetType: 'division',
+    targetId: division.id,
+    details: `Swapped ${outgoing ? outgoing.name : 'a player'} out for ${incoming.name} in "${division.name}" (${swapped.length} remaining fixture(s) reassigned)`,
+  });
+
+  writeDb(db);
+  res.json({ division: hydrateDivision(db, division), swapped, blockedInProgress });
+}));
+
 // ---------- Players ----------
 
 app.get('/api/players', requireAuth, asyncRoute((req, res) => {
