@@ -949,9 +949,10 @@ export const demoApi = {
     return hydrateDivision(division);
   }),
 
-  substitutePlayer: op((divisionId, outgoingPlayerId, incomingPlayerId) => {
+  substitutePlayer: op((divisionId, outgoingPlayerId, incomingPlayerId, reason = 'substitution') => {
     if (!outgoingPlayerId || !incomingPlayerId) throw new ApiError(400, 'outgoingPlayerId and incomingPlayerId are required');
     if (outgoingPlayerId === incomingPlayerId) throw new ApiError(400, 'The replacement must be a different player from the one dropping out');
+    if (!['substitution', 'retirement'].includes(reason)) throw new ApiError(400, "reason must be 'substitution' or 'retirement'");
     const division = db.divisions.find((d) => d.id === divisionId);
     if (!division) throw new ApiError(404, 'Division not found');
     if (division.entryType !== 'singles') throw new ApiError(400, 'Player substitution is only available for singles divisions right now');
@@ -977,17 +978,28 @@ export const demoApi = {
       swapped.push({ fixtureId: fixture.id, round: fixture.round });
     }
     division.playerIds.push(incomingPlayerId);
+    // A 'retirement' also drops the outgoing player from the roster, so
+    // their row disappears from the League Table - unlike a plain
+    // 'substitution', where they stay listed with their played-so-far
+    // record frozen. Either way, computeStandings only ever aggregates a
+    // row from that row's own fixtures, so this never touches opponents'
+    // already-completed results.
+    if (reason === 'retirement') {
+      division.playerIds = division.playerIds.filter((id) => id !== outgoingPlayerId);
+    }
     if (!division.substitutions) division.substitutions = [];
     division.substitutions.push({
       id: uuid(), outgoingPlayerId, outgoingPlayerName: outgoing ? outgoing.name : 'Unknown player',
-      incomingPlayerId, incomingPlayerName: incoming.name, at: new Date().toISOString(),
+      incomingPlayerId, incomingPlayerName: incoming.name, reason, at: new Date().toISOString(),
       by: adminLabel(), fixturesSwapped: swapped.length,
     });
     recordAudit(db, {
       actor: adminLabel(), action: 'division.substitute_player', targetType: 'division', targetId: division.id,
-      details: `Swapped ${outgoing ? outgoing.name : 'a player'} out for ${incoming.name} in "${division.name}" (${swapped.length} remaining fixture(s) reassigned)`,
+      details: reason === 'retirement'
+        ? `${outgoing ? outgoing.name : 'A player'} retired from "${division.name}" - removed from the League Table, ${incoming.name} took over ${swapped.length} remaining fixture(s)`
+        : `Swapped ${outgoing ? outgoing.name : 'a player'} out for ${incoming.name} in "${division.name}" (${swapped.length} remaining fixture(s) reassigned)`,
     });
-    return { division: hydrateDivision(division), swapped, blockedInProgress };
+    return { division: hydrateDivision(division), swapped, blockedInProgress, reason };
   }),
 
   getFixture: op((id) => {

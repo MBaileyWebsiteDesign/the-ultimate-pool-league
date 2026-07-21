@@ -91,7 +91,9 @@ full-featured competition management that Wix has no built-in system for.
   bracket that's already progressed past that result; pure score corrections (same
   winner) are always allowed.
 - **Mid-season player substitution** (singles divisions): if a player drops out, an
-  admin can swap them for a replacement from the division's page. Every fixture of
+  admin can swap them for a replacement from the division's page, choosing whether it's
+  temporary cover (the outgoing player stays visible in the League Table) or the player
+  is retiring from the league (their row is removed from the table). Every fixture of
   theirs that hasn't been played yet moves to the replacement; anything already
   completed - or already partway through - is left exactly as it was, so history and
   standings for the games actually played never change. See **Player substitution**
@@ -213,26 +215,38 @@ hand.
 
 ## Player substitution
 
-Real leagues lose players mid-season - someone moves away, drops out, whatever the
-reason. From a singles division's page (once fixtures have been generated), an admin
-sees a "Substitute a Player" panel: pick who's leaving and who's replacing them from the
-registered-player list, and:
+Real leagues lose players mid-season for two different reasons, and this feature treats
+them differently: someone might just be missing a stretch of games (**temporary
+cover**), or someone might be leaving the league for good (**retiring**). From a singles
+division's page (once fixtures have been generated), an admin sees a "Substitute a
+Player" panel: pick who's leaving, who's replacing them, and which of the two reasons
+applies, then:
 
 - Every fixture of the outgoing player's that's still `scheduled` (nobody has played it
   yet) gets handed to the incoming player - same round, same opponent, just a new name
-  on that side.
+  on that side. This happens identically either way.
 - Anything already `completed` is left completely untouched - the outgoing player's
-  record for the games they actually played stays exactly as it was, permanently.
+  record for the games they actually played stays exactly as it was, permanently,
+  regardless of which reason was chosen.
 - Anything `in_progress` (some frames already recorded, but not finished) is also left
   alone rather than guessed at - it's reported back separately so the admin knows it
   still needs the outgoing player to finish it out, or an admin score override, before
   it can be reassigned too.
-- The outgoing player isn't removed from the division - their standings row keeps
-  showing whatever they'd already played, it just stops growing. The incoming player is
-  added alongside them and starts accumulating their own record from that point on.
+- **Temporary cover** leaves the outgoing player on the division's roster - their
+  standings row keeps showing whatever they'd already played, it just stops growing. The
+  incoming player is added alongside them and starts accumulating their own record from
+  that point on.
+- **Retiring** additionally removes the outgoing player from the division's roster, so
+  their row disappears from the League Table from that point on. Their already-completed
+  matches aren't touched, so nothing about their opponents' won/lost/frame counts
+  changes - the standings calculation builds each row purely from that player's own
+  fixtures, so removing one player's row can't affect anyone else's numbers. Their full
+  match history is still visible on their own player profile page; they just no longer
+  show up in this division's live table.
 - Every substitution is recorded (who was swapped for whom, when, by which admin, how
-  many fixtures moved) both in the division's own history (shown right under the panel)
-  and in the general admin audit log.
+  many fixtures moved, and whether it was temporary cover or a retirement) both in the
+  division's own history (shown right under the panel) and in the general admin audit
+  log.
 
 There's currently no "wipe the score and start the replacement from zero" option - if
 that's ever needed, it should be built as its own explicit feature rather than folded
@@ -443,7 +457,7 @@ the Express server to serve) rather than Pages.
 | POST/DELETE | `/api/divisions/:id/teams` | Add / remove a team (teams, pre-fixtures only) |
 | POST/DELETE | `/api/teams/:teamId/players` | Add / remove a player by `playerId` on a team roster (same registered-user requirement) |
 | POST | `/api/divisions/:id/generate-fixtures` | Generate the fixture list (round robin or knockout bracket, per the division's `scheduling`); optionally accepts `{ startDate, gapDays }` to also set `scheduledDate` on every fixture |
-| POST | `/api/divisions/:id/substitute-player` | Swap a player out for a replacement (singles only) - reassigns not-yet-started fixtures, leaves completed/in-progress ones alone (requires admin; logged) |
+| POST | `/api/divisions/:id/substitute-player` | Swap a player out for a replacement (singles only) - reassigns not-yet-started fixtures, leaves completed/in-progress ones alone; `reason: 'substitution'` (default) keeps the outgoing player on the League Table, `reason: 'retirement'` removes them from it (requires admin; logged) |
 | GET | `/api/fixtures/:id` | Fixture detail (requires login; singles or team, includes `bothEntrantsKnown` for knockout TBD slots) |
 | POST | `/api/fixtures/:id/frames` | Record a frame winner (singles) |
 | DELETE | `/api/fixtures/:id/frames/last` | Undo the last recorded frame (blocked once the result has advanced a bracket) |

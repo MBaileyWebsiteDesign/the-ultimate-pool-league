@@ -83,10 +83,10 @@ const networkApi = {
     request(`/divisions/${divisionId}/players/${playerId}`, { method: 'DELETE' }),
   generateFixtures: (divisionId, data = {}) =>
     request(`/divisions/${divisionId}/generate-fixtures`, { method: 'POST', body: JSON.stringify(data) }),
-  substitutePlayer: (divisionId, outgoingPlayerId, incomingPlayerId) =>
+  substitutePlayer: (divisionId, outgoingPlayerId, incomingPlayerId, reason = 'substitution') =>
     request(`/divisions/${divisionId}/substitute-player`, {
       method: 'POST',
-      body: JSON.stringify({ outgoingPlayerId, incomingPlayerId }),
+      body: JSON.stringify({ outgoingPlayerId, incomingPlayerId, reason }),
     }),
 
   getFixture: (id) => request(`/fixtures/${id}`),
