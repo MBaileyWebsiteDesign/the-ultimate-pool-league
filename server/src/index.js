@@ -1288,7 +1288,14 @@ app.post('/api/admin/users/import', requireAdmin, asyncRoute((req, res) => {
   }
 
   writeDb(db);
-  res.status(created.length > 0 ? 201 : 400).json({ created, skipped, errors });
+  // Note: a 400 here used to fire whenever every row failed validation (e.g.
+  // all 14 rows missing a required column) - even though the request itself
+  // was well-formed. That tripped the client's generic error handler, which
+  // throws "Request failed: 400" and swallows the detailed per-row reasons
+  // in `errors`/`skipped`, leaving the admin with a useless message. A
+  // structurally invalid request (no rows array) is already rejected above;
+  // per-row failures are a normal, successful response, not an error.
+  res.status(created.length > 0 ? 201 : 200).json({ created, skipped, errors });
 }));
 
 app.get('/api/admin/audit-log', requireAdmin, asyncRoute((req, res) => {
@@ -1503,7 +1510,13 @@ app.post('/api/admin/seasons/:leagueId/import-players', requireAdmin, asyncRoute
   });
 
   writeDb(db);
-  res.status(created.length + linkedExisting.length > 0 ? 201 : 400).json({ created, linkedExisting, errors });
+  // Same fix as the standalone bulk-user import above: don't return 400 just
+  // because every row failed validation (e.g. a division name that doesn't
+  // match this season, or a missing column) - that's a normal response with
+  // zero successes, not a malformed request, and a 400 here makes the client
+  // throw a generic "Request failed: 400" instead of showing the real
+  // per-row reasons in `errors`.
+  res.status(created.length + linkedExisting.length > 0 ? 201 : 200).json({ created, linkedExisting, errors });
 }));
 
 // Generates round-robin fixtures for every division in the season that has

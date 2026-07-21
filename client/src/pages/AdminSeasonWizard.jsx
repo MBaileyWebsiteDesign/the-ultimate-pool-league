@@ -43,6 +43,24 @@ function triggerDownload(blob, filename) {
   URL.revokeObjectURL(url);
 }
 
+// Column names are matched exactly (firstName, lastName, division, ...)
+// against whatever key papaparse/xlsx hands back for each header cell.
+// Excel/Numbers exports routinely add a leading UTF-8 BOM to the very first
+// header cell, or leave stray leading/trailing spaces on any header from
+// copy-paste - either one silently turns e.g. "firstName" into a different
+// key, so every row fails "firstName is required" with no obvious reason.
+// Trim (and strip any BOM char) off every key here so the required-field
+// checks on the server actually see the field the admin thinks they filled in.
+function cleanRowKeys(rows) {
+  return rows.map((row) => {
+    const clean = {};
+    for (const [key, value] of Object.entries(row)) {
+      clean[key.replace(/^﻿/, '').trim()] = value;
+    }
+    return clean;
+  });
+}
+
 function parseUploadedFile(file) {
   return new Promise((resolve, reject) => {
     const isCsv = file.name.toLowerCase().endsWith('.csv');
@@ -50,7 +68,8 @@ function parseUploadedFile(file) {
       Papa.parse(file, {
         header: true,
         skipEmptyLines: true,
-        complete: (result) => resolve(result.data),
+        transformHeader: (h) => h.replace(/^﻿/, '').trim(),
+        complete: (result) => resolve(cleanRowKeys(result.data)),
         error: reject,
       });
       return;
@@ -60,7 +79,7 @@ function parseUploadedFile(file) {
       try {
         const workbook = XLSX.read(e.target.result, { type: 'array' });
         const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-        resolve(XLSX.utils.sheet_to_json(firstSheet, { defval: '' }));
+        resolve(cleanRowKeys(XLSX.utils.sheet_to_json(firstSheet, { defval: '' })));
       } catch (err) {
         reject(err);
       }
