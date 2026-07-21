@@ -11,7 +11,7 @@ import { computeStandings } from './services/standings.js';
 import { computeTeamStandings } from './services/teamStandings.js';
 import { buildPlayerProfile } from './services/playerProfile.js';
 import { ApiError } from './errors.js';
-import { login, requireAdmin } from './auth.js';
+import { login } from './auth.js';
 import {
   CLASSIFICATIONS,
   hashPassword,
@@ -20,7 +20,12 @@ import {
   publicUser,
   requireUser,
   requireAnyAuth,
+  requireAdminRole,
 } from './userAuth.js';
+import { recordAudit } from './services/auditLog.js';
+
+const ROLES = ['player', 'admin'];
+const STATUSES = ['active', 'suspended'];
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLIENT_DIST = path.join(__dirname, '..', '..', 'client', 'dist');
@@ -79,6 +84,19 @@ app.post('/api/users/register', asyncRoute((req, res) => {
     throw new ApiError(409, 'An account with this email already exists');
   }
 
+  // Every registered account gets a linked `Player` roster record under the
+  // same name (find-or-create, matching the same case-insensitive dedup used
+  // when a captain adds a player directly) - this is what lets "my stats"
+  // on the account page point somewhere immediately, even before they've
+  // been added to a division. See the README data model note on User vs
+  // Player for the known limitation (name collisions merge onto one Player).
+  const fullName = `${firstName.trim()} ${lastName.trim()}`;
+  let linkedPlayer = db.players.find((p) => p.name.toLowerCase() === fullName.toLowerCase());
+  if (!linkedPlayer) {
+    linkedPlayer = { id: uuid(), name: fullName };
+    db.players.push(linkedPlayer);
+  }
+
   const user = {
     id: uuid(),
     firstName: firstName.trim(),
@@ -89,6 +107,9 @@ app.post('/api/users/register', asyncRoute((req, res) => {
     venue: venue.trim(),
     teamName: teamName.trim(),
     classification: classification || null,
+    role: 'player',
+    status: 'active',
+    playerId: linkedPlayer.id,
     createdAt: new Date().toISOString(),
   };
   db.users.push(user);
@@ -108,16 +129,86 @@ app.post('/api/users/login', asyncRoute((req, res) => {
   if (!user || !verifyPassword(password, user.passwordHash)) {
     throw new ApiError(401, 'Invalid email or password');
   }
+  if (user.status === 'suspended') {
+    throw new ApiError(403, 'This account has been suspended');
+  }
 
   const { token, expiresAt } = createUserToken(user.id);
   res.json({ token, expiresAt, user: publicUser(user) });
 }));
 
 app.get('/api/users/me', requireUser, asyncRoute((req, res) => {
+  res.json(publicUser(req.playerSession.user));
+}));
+
+// Keeps a User's linked Player roster entry's display name in sync whenever
+// the account's name changes, whether the edit came from the player
+// themselves or from an admin.
+function syncLinkedPlayerName(db, user) {
+  if (!user.playerId) return;
+  const player = db.players.find((p) => p.id === user.playerId);
+  if (player) player.name = `${user.firstName} ${user.lastName}`;
+}
+
+function applyProfileFields(db, user, fields) {
+  const { firstName, lastName, email, phone, venue, teamName, classification } = fields;
+  if (firstName !== undefined) {
+    if (!firstName || !firstName.trim()) throw new ApiError(400, 'First name is required');
+    user.firstName = firstName.trim();
+  }
+  if (lastName !== undefined) {
+    if (!lastName || !lastName.trim()) throw new ApiError(400, 'Last name is required');
+    user.lastName = lastName.trim();
+  }
+  if (email !== undefined) {
+    if (!email || !email.trim()) throw new ApiError(400, 'Email is required');
+    const normalized = email.trim().toLowerCase();
+    if (db.users.some((u) => u.id !== user.id && u.email.toLowerCase() === normalized)) {
+      throw new ApiError(409, 'An account with this email already exists');
+    }
+    user.email = email.trim();
+  }
+  if (phone !== undefined) user.phone = phone ? phone.trim() : '';
+  if (venue !== undefined) {
+    if (!venue || !venue.trim()) throw new ApiError(400, 'Venue is required');
+    user.venue = venue.trim();
+  }
+  if (teamName !== undefined) {
+    if (!teamName || !teamName.trim()) throw new ApiError(400, 'Team name is required');
+    user.teamName = teamName.trim();
+  }
+  if (classification !== undefined) {
+    if (classification && !CLASSIFICATIONS.includes(classification)) {
+      throw new ApiError(400, `classification must be one of: ${CLASSIFICATIONS.join(', ')}`);
+    }
+    user.classification = classification || null;
+  }
+  syncLinkedPlayerName(db, user);
+}
+
+app.patch('/api/users/me', requireUser, asyncRoute((req, res) => {
   const db = readDb();
   const user = db.users.find((u) => u.id === req.playerSession.userId);
-  if (!user) throw new ApiError(404, 'Player account not found');
+  applyProfileFields(db, user, req.body);
+  writeDb(db);
   res.json(publicUser(user));
+}));
+
+app.post('/api/users/me/change-password', requireUser, asyncRoute((req, res) => {
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) {
+    throw new ApiError(400, 'Current and new password are required');
+  }
+  if (newPassword.length < 8) throw new ApiError(400, 'New password must be at least 8 characters');
+
+  const db = readDb();
+  const user = db.users.find((u) => u.id === req.playerSession.userId);
+  if (!verifyPassword(currentPassword, user.passwordHash)) {
+    throw new ApiError(401, 'Current password is incorrect');
+  }
+  user.passwordHash = hashPassword(newPassword);
+  writeDb(db);
+  res.json({ ok: true });
 }));
 
 // ---------- Leagues ----------
@@ -127,7 +218,7 @@ app.get('/api/leagues', requireAnyAuth, asyncRoute((req, res) => {
   res.json(db.leagues);
 }));
 
-app.post('/api/leagues', requireAdmin, asyncRoute((req, res) => {
+app.post('/api/leagues', requireAdminRole, asyncRoute((req, res) => {
   const { name, sport = 'English 8-Ball Pool', matchFormat = 'singles', raceTo = 6, scheduling = 'round_robin_single' } = req.body;
   if (!name || !name.trim()) throw new ApiError(400, 'League name is required');
 
@@ -164,7 +255,7 @@ app.get('/api/leagues/:id', requireAnyAuth, asyncRoute((req, res) => {
 //   league's own default, since a league often runs its regular season as a
 //   round robin but a separate cup division as a knockout.
 
-app.post('/api/leagues/:leagueId/divisions', requireAdmin, asyncRoute((req, res) => {
+app.post('/api/leagues/:leagueId/divisions', requireAdminRole, asyncRoute((req, res) => {
   const { name, order = 0, entryType = 'singles', legsPerMatch = 5 } = req.body;
   const db = readDb();
   const league = db.leagues.find((l) => l.id === req.params.leagueId);
@@ -201,18 +292,20 @@ app.post('/api/leagues/:leagueId/divisions', requireAdmin, asyncRoute((req, res)
 
 function hydrateDivision(db, division) {
   const fixtures = db.fixtures.filter((f) => f.divisionId === division.id);
+  const league = db.leagues.find((l) => l.id === division.leagueId);
+  const leagueName = league ? league.name : null;
 
   if (division.entryType === 'teams') {
     const teams = db.teams
       .filter((t) => division.teamIds.includes(t.id))
       .map((t) => ({ ...t, players: db.players.filter((p) => t.playerIds.includes(p.id)) }));
     const standings = computeTeamStandings(division, db.fixtures, db.teams);
-    return { ...division, teams, fixtures, standings };
+    return { ...division, leagueName, teams, fixtures, standings };
   }
 
   const players = db.players.filter((p) => division.playerIds.includes(p.id));
   const standings = computeStandings(division, db.fixtures, db.players);
-  return { ...division, players, fixtures, standings };
+  return { ...division, leagueName, players, fixtures, standings };
 }
 
 app.get('/api/divisions/:id', requireAnyAuth, asyncRoute((req, res) => {
@@ -507,6 +600,7 @@ app.get('/api/fixtures/:id', requireAnyAuth, asyncRoute((req, res) => {
   const fixture = db.fixtures.find((f) => f.id === req.params.id);
   if (!fixture) throw new ApiError(404, 'Fixture not found');
   const division = db.divisions.find((d) => d.id === fixture.divisionId);
+  const divisionName = division ? division.name : null;
 
   if (division.entryType === 'teams') {
     const withPlayers = (team) => (team ? { ...team, players: db.players.filter((p) => team.playerIds.includes(p.id)) } : null);
@@ -517,12 +611,12 @@ app.get('/api/fixtures/:id', requireAnyAuth, asyncRoute((req, res) => {
       homePlayer: leg.homePlayerId ? db.players.find((p) => p.id === leg.homePlayerId) : null,
       awayPlayer: leg.awayPlayerId ? db.players.find((p) => p.id === leg.awayPlayerId) : null,
     }));
-    return res.json({ ...fixture, legs, homeTeam, awayTeam, bothEntrantsKnown: !!(fixture.homeTeamId && fixture.awayTeamId) });
+    return res.json({ ...fixture, divisionName, legs, homeTeam, awayTeam, bothEntrantsKnown: !!(fixture.homeTeamId && fixture.awayTeamId) });
   }
 
   const homePlayer = fixture.homePlayerId ? db.players.find((p) => p.id === fixture.homePlayerId) : null;
   const awayPlayer = fixture.awayPlayerId ? db.players.find((p) => p.id === fixture.awayPlayerId) : null;
-  res.json({ ...fixture, homePlayer, awayPlayer, bothEntrantsKnown: !!(fixture.homePlayerId && fixture.awayPlayerId) });
+  res.json({ ...fixture, divisionName, homePlayer, awayPlayer, bothEntrantsKnown: !!(fixture.homePlayerId && fixture.awayPlayerId) });
 }));
 
 app.post('/api/fixtures/:id/frames', asyncRoute((req, res) => {
@@ -706,6 +800,92 @@ app.delete('/api/fixtures/:id/legs/:legNumber/frames/last', asyncRoute((req, res
   res.json(fixture);
 }));
 
+// ---------- Admin score/game override ----------
+// Lets an admin directly set a fixture's final score to correct a
+// mis-recorded result, bypassing the normal frame-by-frame flow entirely.
+// Deliberately blunt: it replaces the recorded frames/legs with just the
+// final tally (tagged `adminOverride` so the UI can show it was hand-set
+// rather than played out), rather than trying to reconstruct a plausible
+// frame history. Re-propagates into the next knockout round if the winner
+// changed, but refuses if that would silently overwrite a match that's
+// already been played - the admin has to fix the downstream fixture first,
+// so a correction can never quietly erase someone else's recorded result.
+app.post('/api/fixtures/:id/override', requireAdminRole, asyncRoute((req, res) => {
+  const { homeScore, awayScore } = req.body;
+  const db = readDb();
+  const fixture = db.fixtures.find((f) => f.id === req.params.id);
+  if (!fixture) throw new ApiError(404, 'Fixture not found');
+  const division = db.divisions.find((d) => d.id === fixture.divisionId);
+  const isTeams = division.entryType === 'teams';
+
+  if (isTeams) {
+    if (!fixture.homeTeamId || !fixture.awayTeamId) {
+      throw new ApiError(400, 'Both teams for this fixture are not yet known');
+    }
+  } else if (!fixture.homePlayerId || !fixture.awayPlayerId) {
+    throw new ApiError(400, 'Both players for this fixture are not yet known');
+  }
+  if (!Number.isInteger(homeScore) || !Number.isInteger(awayScore) || homeScore < 0 || awayScore < 0) {
+    throw new ApiError(400, 'homeScore and awayScore must be non-negative whole numbers');
+  }
+  if (!isTeams && homeScore === awayScore) {
+    throw new ApiError(400, 'Singles matches cannot end level - set different scores for home and away');
+  }
+
+  const oldWinnerId = isTeams ? fixture.winnerTeamId : fixture.winnerPlayerId;
+  const newWinnerId = homeScore === awayScore
+    ? null
+    : homeScore > awayScore
+      ? (isTeams ? fixture.homeTeamId : fixture.homePlayerId)
+      : (isTeams ? fixture.awayTeamId : fixture.awayPlayerId);
+
+  if (fixture.nextFixtureId && oldWinnerId && newWinnerId !== oldWinnerId) {
+    const next = db.fixtures.find((f) => f.id === fixture.nextFixtureId);
+    const nextHasStarted = next && (isTeams ? next.legs.some((l) => l.status !== 'pending') : next.frames.length > 0);
+    if (nextHasStarted) {
+      throw new ApiError(409, 'This result has already progressed to a fixture that has started - override or reset that fixture first');
+    }
+  }
+
+  if (isTeams) {
+    fixture.homeLegsWon = homeScore;
+    fixture.awayLegsWon = awayScore;
+    fixture.winnerTeamId = newWinnerId;
+    fixture.legs = fixture.legs.map((leg) => ({
+      ...leg,
+      homePlayerId: null,
+      awayPlayerId: null,
+      frames: [],
+      homeFrameScore: 0,
+      awayFrameScore: 0,
+      status: 'pending',
+      winnerPlayerId: null,
+    }));
+  } else {
+    fixture.homeFrameScore = homeScore;
+    fixture.awayFrameScore = awayScore;
+    fixture.frames = [];
+    fixture.winnerPlayerId = newWinnerId;
+  }
+  fixture.status = 'completed';
+  fixture.adminOverride = { at: new Date().toISOString(), by: req.adminSession.label };
+
+  if (fixture.nextFixtureId && newWinnerId && newWinnerId !== oldWinnerId) {
+    propagateWinner(db, division, fixture, newWinnerId);
+  }
+
+  recordAudit(db, {
+    actor: req.adminSession.label,
+    action: 'fixture.override',
+    targetType: 'fixture',
+    targetId: fixture.id,
+    details: `Set final score to ${homeScore}-${awayScore}`,
+  });
+
+  writeDb(db);
+  res.json(fixture);
+}));
+
 // ---------- Players ----------
 
 app.get('/api/players', requireAnyAuth, asyncRoute((req, res) => {
@@ -718,6 +898,115 @@ app.get('/api/players/:id', requireAnyAuth, asyncRoute((req, res) => {
   const profile = buildPlayerProfile(db, req.params.id);
   if (!profile) throw new ApiError(404, 'Player not found');
   res.json(profile);
+}));
+
+// ---------- Admin: user management ----------
+// Everything here requires requireAdminRole (the super-admin account or a
+// promoted player). A promoted admin can manage every account including
+// other admins and their own - there's no protection against an admin
+// demoting/suspending themselves in this v1; keep at least one working admin
+// login (the super-admin env-configured account always works) if you're
+// experimenting with roles.
+
+app.get('/api/admin/users', requireAdminRole, asyncRoute((req, res) => {
+  const db = readDb();
+  const q = (req.query.q || '').trim().toLowerCase();
+  let users = db.users;
+  if (q) {
+    users = users.filter((u) =>
+      `${u.firstName} ${u.lastName}`.toLowerCase().includes(q) ||
+      u.email.toLowerCase().includes(q) ||
+      u.venue.toLowerCase().includes(q) ||
+      u.teamName.toLowerCase().includes(q)
+    );
+  }
+  users = [...users].sort((a, b) => a.lastName.localeCompare(b.lastName));
+  res.json(users.map(publicUser));
+}));
+
+app.get('/api/admin/users/:id', requireAdminRole, asyncRoute((req, res) => {
+  const db = readDb();
+  const user = db.users.find((u) => u.id === req.params.id);
+  if (!user) throw new ApiError(404, 'User not found');
+  res.json(publicUser(user));
+}));
+
+app.patch('/api/admin/users/:id', requireAdminRole, asyncRoute((req, res) => {
+  const db = readDb();
+  const user = db.users.find((u) => u.id === req.params.id);
+  if (!user) throw new ApiError(404, 'User not found');
+  applyProfileFields(db, user, req.body);
+  recordAudit(db, {
+    actor: req.adminSession.label,
+    action: 'user.edit',
+    targetType: 'user',
+    targetId: user.id,
+    details: `Edited profile for ${user.firstName} ${user.lastName}`,
+  });
+  writeDb(db);
+  res.json(publicUser(user));
+}));
+
+app.post('/api/admin/users/:id/role', requireAdminRole, asyncRoute((req, res) => {
+  const { role } = req.body;
+  if (!ROLES.includes(role)) throw new ApiError(400, `role must be one of: ${ROLES.join(', ')}`);
+  const db = readDb();
+  const user = db.users.find((u) => u.id === req.params.id);
+  if (!user) throw new ApiError(404, 'User not found');
+  user.role = role;
+  recordAudit(db, {
+    actor: req.adminSession.label,
+    action: 'user.role',
+    targetType: 'user',
+    targetId: user.id,
+    details: `Set role of ${user.firstName} ${user.lastName} to ${role}`,
+  });
+  writeDb(db);
+  res.json(publicUser(user));
+}));
+
+app.post('/api/admin/users/:id/status', requireAdminRole, asyncRoute((req, res) => {
+  const { status } = req.body;
+  if (!STATUSES.includes(status)) throw new ApiError(400, `status must be one of: ${STATUSES.join(', ')}`);
+  const db = readDb();
+  const user = db.users.find((u) => u.id === req.params.id);
+  if (!user) throw new ApiError(404, 'User not found');
+  user.status = status;
+  recordAudit(db, {
+    actor: req.adminSession.label,
+    action: 'user.status',
+    targetType: 'user',
+    targetId: user.id,
+    details: `Set status of ${user.firstName} ${user.lastName} to ${status}`,
+  });
+  writeDb(db);
+  res.json(publicUser(user));
+}));
+
+app.post('/api/admin/users/:id/reset-password', requireAdminRole, asyncRoute((req, res) => {
+  const { newPassword } = req.body;
+  if (!newPassword || newPassword.length < 8) {
+    throw new ApiError(400, 'New password must be at least 8 characters');
+  }
+  const db = readDb();
+  const user = db.users.find((u) => u.id === req.params.id);
+  if (!user) throw new ApiError(404, 'User not found');
+  user.passwordHash = hashPassword(newPassword);
+  recordAudit(db, {
+    actor: req.adminSession.label,
+    action: 'user.reset_password',
+    targetType: 'user',
+    targetId: user.id,
+    details: `Force-reset password for ${user.firstName} ${user.lastName}`,
+  });
+  writeDb(db);
+  res.json({ ok: true });
+}));
+
+app.get('/api/admin/audit-log', requireAdminRole, asyncRoute((req, res) => {
+  const db = readDb();
+  const entries = [...db.auditLog].reverse().slice(0, 200);
+  res.json(entries);
 }));
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
