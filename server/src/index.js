@@ -1,45 +1,54 @@
 import express from 'express';
 import cors from 'cors';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { v4 as uuid } from 'uuid';
+import { existsSync } from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { readDb, writeDb } from './db.js';
-import { ApiError } from './errors.js';
-import { generateRoundRobinFixtures } from './services/roundRobin.js';
-import { generateBracket, applyBracketResult } from './services/bracket.js';
+import { generateRoundRobin } from './services/roundRobin.js';
+import { buildBracketRounds } from './services/bracket.js';
 import { computeStandings } from './services/standings.js';
 import { computeTeamStandings } from './services/teamStandings.js';
-import { computePlayerProfile } from './services/playerProfile.js';
-import { recordAudit } from './services/auditLog.js';
+import { buildPlayerProfile } from './services/playerProfile.js';
+import { ApiError } from './errors.js';
 import {
   CLASSIFICATIONS,
   hashPassword,
   verifyPassword,
   generateTempPassword,
   createSessionToken,
+  verifySessionToken,
   publicUser,
   requireAuth,
   requireAdmin,
 } from './userAuth.js';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const app = express();
-app.use(cors());
-app.use(express.json());
+import { recordAudit } from './services/auditLog.js';
 
 const STATUSES = ['active', 'suspended'];
 
-function asyncRoute(fn) {
-  return (req, res, next) => {
-    Promise.resolve(fn(req, res, next)).catch(next);
-  };
-}
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const CLIENT_DIST = path.join(__dirname, '..', '..', 'client', 'dist');
 
-// ---------- Auth: single unified login for every account ----------
-// There used to be two entirely separate login flows here (a hardcoded admin
-// username/password, and a player email/password) - this is gone. Every
-// account, whatever combination of isAdmin/isCaptain it holds, signs in
-// through this one endpoint.
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '5mb' })); // season CSV/Excel imports can be a few hundred rows
+
+const asyncRoute = (fn) => (req, res, next) => {
+  try {
+    fn(req, res);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const SCHEDULING_TYPES = ['round_robin_single', 'knockout_single_elim'];
+
+// ---------- Accounts & auth ----------
+// One account model, one login. `db.users` holds everyone; `isAdmin` and
+// `isCaptain` are just boolean flags on an account rather than a separate
+// kind of account. Anyone can self-register (POST /users/register), and an
+// admin can flag any account as admin and/or captain from the user
+// management screen, or via the season CSV/Excel import.
 
 app.post('/api/auth/login', asyncRoute((req, res) => {
   const { email, password } = req.body;
@@ -106,10 +115,9 @@ app.get('/api/users/me', requireAuth, asyncRoute((req, res) => {
 
 // Shared account-creation helper: builds the User record (and its linked
 // Player roster entry, find-or-create by name) the same way whether the
-// account came from self-registration, the season CSV/Excel import, the
-// wizard's "add a player manually" step, or the standalone bulk import on
-// Manage Users. Doesn't write to disk - caller batches the writeDb() once
-// all rows in a request are processed.
+// account came from self-registration, the season CSV/Excel import, or the
+// wizard's "add a player manually" step. Doesn't write to disk - caller
+// batches the writeDb() once all rows in a request are processed.
 function createUserAccount(db, fields) {
   const fullName = `${fields.firstName} ${fields.lastName}`;
   let linkedPlayer = db.players.find((p) => p.name.toLowerCase() === fullName.toLowerCase());
@@ -211,7 +219,6 @@ function applyProfileFields(db, user, fields) {
 app.patch('/api/users/me', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
   const user = db.users.find((u) => u.id === req.auth.userId);
-  if (!user) throw new ApiError(404, 'User not found');
   applyProfileFields(db, user, req.body);
   writeDb(db);
   res.json(publicUser(user));
@@ -219,12 +226,13 @@ app.patch('/api/users/me', requireAuth, asyncRoute((req, res) => {
 
 app.post('/api/users/me/change-password', requireAuth, asyncRoute((req, res) => {
   const { currentPassword, newPassword } = req.body;
-  if (!currentPassword) throw new ApiError(400, 'Current password is required');
-  if (!newPassword || newPassword.length < 8) throw new ApiError(400, 'New password must be at least 8 characters');
+  if (!currentPassword || !newPassword) {
+    throw new ApiError(400, 'Current and new password are required');
+  }
+  if (newPassword.length < 8) throw new ApiError(400, 'New password must be at least 8 characters');
 
   const db = readDb();
   const user = db.users.find((u) => u.id === req.auth.userId);
-  if (!user) throw new ApiError(404, 'User not found');
   if (!verifyPassword(currentPassword, user.passwordHash)) {
     throw new ApiError(401, 'Current password is incorrect');
   }
@@ -233,64 +241,50 @@ app.post('/api/users/me/change-password', requireAuth, asyncRoute((req, res) => 
   res.json({ ok: true });
 }));
 
-// Every fixture (singles or team-leg) the logged-in account's linked Player
-// is involved in, across every division/team - powers the Player Management
-// Portal's "My Fixtures" panel and the Captain Portal's match list. Split
-// into upcoming (anything not completed) vs. recent (completed) on the
-// client; here we just return everything, enriched with league/division/
-// opponent names so the client doesn't need extra round-trips.
+// A player's own upcoming/recent fixtures, across every division they're
+// registered in (singles) or rostered onto (teams) - powers the Player
+// Portal's "My Fixtures" panel without the client having to know which
+// divisions/teams they belong to.
 app.get('/api/users/me/fixtures', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
   const user = req.auth.user;
   if (!user.playerId) return res.json([]);
+  const playerId = user.playerId;
 
-  const results = [];
-  for (const division of db.divisions) {
-    const league = db.leagues.find((l) => l.id === division.leagueId);
-    if (division.entryType === 'singles') {
-      for (const fixture of db.fixtures.filter((f) => f.divisionId === division.id)) {
-        let opponentPlayerId = null;
-        if (fixture.homePlayerId === user.playerId) opponentPlayerId = fixture.awayPlayerId;
-        else if (fixture.awayPlayerId === user.playerId) opponentPlayerId = fixture.homePlayerId;
-        else continue;
-        const opponent = db.players.find((p) => p.id === opponentPlayerId);
-        results.push({
-          id: fixture.id,
-          leagueName: league?.name || '',
-          divisionName: division.name,
-          round: fixture.round,
-          opponentName: opponent ? opponent.name : 'TBD',
-          status: fixture.status,
-          scheduledDate: fixture.scheduledDate || null,
-        });
-      }
-    } else {
-      const myTeam = db.teams.find((t) => t.divisionId === division.id && t.playerIds.includes(user.playerId));
-      if (!myTeam) continue;
-      for (const fixture of db.fixtures.filter((f) => f.divisionId === division.id)) {
-        let opponentTeamId = null;
-        if (fixture.homeTeamId === myTeam.id) opponentTeamId = fixture.awayTeamId;
-        else if (fixture.awayTeamId === myTeam.id) opponentTeamId = fixture.homeTeamId;
-        else continue;
-        const opponentTeam = db.teams.find((t) => t.id === opponentTeamId);
-        results.push({
-          id: fixture.id,
-          leagueName: league?.name || '',
-          divisionName: division.name,
-          round: fixture.round,
-          opponentName: opponentTeam ? opponentTeam.name : 'TBD',
-          status: fixture.status,
-          scheduledDate: fixture.scheduledDate || null,
-        });
-      }
-    }
-  }
+  const myTeamIds = db.teams.filter((t) => t.playerIds.includes(playerId)).map((t) => t.id);
 
-  results.sort((a, b) => (a.scheduledDate || '9999-99-99').localeCompare(b.scheduledDate || '9999-99-99'));
-  res.json(results);
+  const fixtures = db.fixtures.filter((f) => {
+    if (f.homePlayerId === playerId || f.awayPlayerId === playerId) return true;
+    if (myTeamIds.includes(f.homeTeamId) || myTeamIds.includes(f.awayTeamId)) return true;
+    return false;
+  });
+
+  const enriched = fixtures.map((f) => {
+    const division = db.divisions.find((d) => d.id === f.divisionId);
+    const league = db.leagues.find((l) => l.id === f.leagueId);
+    const isTeams = !!f.legs;
+    const opponentId = isTeams
+      ? (myTeamIds.includes(f.homeTeamId) ? f.awayTeamId : f.homeTeamId)
+      : (f.homePlayerId === playerId ? f.awayPlayerId : f.homePlayerId);
+    const opponentName = isTeams
+      ? db.teams.find((t) => t.id === opponentId)?.name
+      : db.players.find((p) => p.id === opponentId)?.name;
+    return {
+      id: f.id,
+      leagueName: league?.name,
+      divisionName: division?.name,
+      round: f.round,
+      status: f.status,
+      scheduledDate: f.scheduledDate || null,
+      opponentName: opponentName || 'TBD',
+    };
+  });
+
+  enriched.sort((a, b) => (a.scheduledDate || '').localeCompare(b.scheduledDate || '') || a.round - b.round);
+  res.json(enriched);
 }));
 
-// ---------- Leagues & divisions ----------
+// ---------- Leagues ----------
 
 app.get('/api/leagues', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
@@ -298,18 +292,15 @@ app.get('/api/leagues', requireAuth, asyncRoute((req, res) => {
 }));
 
 app.post('/api/leagues', requireAdmin, asyncRoute((req, res) => {
-  const { name, sport = 'English 8-Ball Pool', format = {} } = req.body;
+  const { name, sport = 'English 8-Ball Pool', matchFormat = 'singles', raceTo = 6, scheduling = 'round_robin_single' } = req.body;
   if (!name || !name.trim()) throw new ApiError(400, 'League name is required');
+
   const db = readDb();
   const league = {
     id: uuid(),
     name: name.trim(),
     sport,
-    format: {
-      matchFormat: format.matchFormat || 'singles',
-      raceTo: format.raceTo || 6,
-      scheduling: format.scheduling || 'round_robin_single',
-    },
+    format: { matchFormat, raceTo, scheduling },
     startDate: null,
     endDate: null,
     createdAt: new Date().toISOString(),
@@ -323,21 +314,40 @@ app.get('/api/leagues/:id', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
   const league = db.leagues.find((l) => l.id === req.params.id);
   if (!league) throw new ApiError(404, 'League not found');
-  const divisions = db.divisions.filter((d) => d.leagueId === league.id).sort((a, b) => a.order - b.order);
+  const divisions = db.divisions
+    .filter((d) => d.leagueId === league.id)
+    .sort((a, b) => a.order - b.order);
   res.json({ ...league, divisions });
 }));
 
+// ---------- Divisions ----------
+// A division has two independent axes:
+// - entryType: "singles" (players register directly) or "teams" (teams
+//   register, each fixture is `legsPerMatch` nominated player-vs-player legs)
+// - scheduling: "round_robin_single" (default - everyone plays everyone once)
+//   or "knockout_single_elim" (single-elimination bracket, byes if the
+//   entrant count isn't a power of 2). This can differ per division from the
+//   league's own default, since a league often runs its regular season as a
+//   round robin but a separate cup division as a knockout.
+
 app.post('/api/leagues/:leagueId/divisions', requireAdmin, asyncRoute((req, res) => {
-  const { name, entryType = 'singles', scheduling = 'round_robin_single', legsPerMatch = null } = req.body;
-  if (!name || !name.trim()) throw new ApiError(400, 'Division name is required');
-  if (!['singles', 'teams'].includes(entryType)) throw new ApiError(400, "entryType must be 'singles' or 'teams'");
-  if (!['round_robin_single', 'knockout_single_elim'].includes(scheduling)) {
-    throw new ApiError(400, "scheduling must be 'round_robin_single' or 'knockout_single_elim'");
-  }
+  const { name, order = 0, entryType = 'singles', legsPerMatch = 5 } = req.body;
   const db = readDb();
   const league = db.leagues.find((l) => l.id === req.params.leagueId);
   if (!league) throw new ApiError(404, 'League not found');
-  const order = db.divisions.filter((d) => d.leagueId === league.id).length;
+  const scheduling = req.body.scheduling || league.format.scheduling || 'round_robin_single';
+
+  if (!name || !name.trim()) throw new ApiError(400, 'Division name is required');
+  if (!['singles', 'teams'].includes(entryType)) {
+    throw new ApiError(400, 'entryType must be "singles" or "teams"');
+  }
+  if (!SCHEDULING_TYPES.includes(scheduling)) {
+    throw new ApiError(400, `scheduling must be one of: ${SCHEDULING_TYPES.join(', ')}`);
+  }
+  if (entryType === 'teams' && (!Number.isInteger(Number(legsPerMatch)) || Number(legsPerMatch) < 1)) {
+    throw new ApiError(400, 'legsPerMatch must be a positive whole number');
+  }
+
   const division = {
     id: uuid(),
     leagueId: league.id,
@@ -345,215 +355,404 @@ app.post('/api/leagues/:leagueId/divisions', requireAdmin, asyncRoute((req, res)
     order,
     entryType,
     scheduling,
-    legsPerMatch: entryType === 'teams' ? (legsPerMatch || 3) : null,
     playerIds: [],
-    teamIds: [],
-    fixturesGenerated: false,
-    startDate: null,
-    endDate: null,
+    teamIds: entryType === 'teams' ? [] : [],
+    legsPerMatch: entryType === 'teams' ? Number(legsPerMatch) : null,
     gapDays: null,
+    fixturesGenerated: false,
   };
   db.divisions.push(division);
   writeDb(db);
   res.status(201).json(division);
 }));
 
+function hydrateDivision(db, division) {
+  const fixtures = db.fixtures.filter((f) => f.divisionId === division.id);
+  const league = db.leagues.find((l) => l.id === division.leagueId);
+  const leagueName = league ? league.name : null;
+
+  if (division.entryType === 'teams') {
+    const teams = db.teams
+      .filter((t) => division.teamIds.includes(t.id))
+      .map((t) => ({ ...t, players: db.players.filter((p) => t.playerIds.includes(p.id)) }));
+    const standings = computeTeamStandings(division, db.fixtures, db.teams);
+    return { ...division, leagueName, teams, fixtures, standings };
+  }
+
+  const players = db.players.filter((p) => division.playerIds.includes(p.id));
+  const standings = computeStandings(division, db.fixtures, db.players);
+  return { ...division, leagueName, players, fixtures, standings };
+}
+
 app.get('/api/divisions/:id', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
   const division = db.divisions.find((d) => d.id === req.params.id);
   if (!division) throw new ApiError(404, 'Division not found');
-  const fixtures = db.fixtures.filter((f) => f.divisionId === division.id);
-
-  if (division.entryType === 'singles') {
-    const players = division.playerIds.map((id) => db.players.find((p) => p.id === id)).filter(Boolean);
-    const standings = computeStandings(division, fixtures, players);
-    res.json({ ...division, players, fixtures, standings });
-  } else {
-    const teams = division.teamIds.map((id) => db.teams.find((t) => t.id === id)).filter(Boolean).map((t) => ({
-      ...t,
-      players: t.playerIds.map((pid) => db.players.find((p) => p.id === pid)).filter(Boolean),
-    }));
-    const standings = computeTeamStandings(division, fixtures, teams);
-    res.json({ ...division, teams, fixtures, standings });
-  }
+  res.json(hydrateDivision(db, division));
 }));
+
+// ---- Singles players ----
+// Players are only ever registered `Users` now (see registeredPlayers()
+// below) - a captain picks a name from the list of people who've actually
+// signed up rather than typing an arbitrary free-text name. This keeps the
+// roster tied to real accounts instead of one-off placeholder names.
+
+// Every registered, active user has (via registration) a linked Player
+// record - this is the pool of names a captain/admin can pick from when
+// building a division roster or a team. Demo/seed players created directly
+// in db.players without a linked user (e.g. the seeded Premier League demo
+// data) are NOT included here, since they don't correspond to a real account.
+function registeredPlayers(db) {
+  const linkedPlayerIds = new Set(
+    db.users.filter((u) => u.status === 'active' && u.playerId).map((u) => u.playerId)
+  );
+  return db.players
+    .filter((p) => linkedPlayerIds.has(p.id))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
 
 app.get('/api/registered-players', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
-  const activePlayerIds = new Set(db.users.filter((u) => u.status === 'active' && u.playerId).map((u) => u.playerId));
-  const players = db.players.filter((p) => activePlayerIds.has(p.id));
-  res.json(players);
+  res.json(registeredPlayers(db));
 }));
 
-app.post('/api/divisions/:id/players', requireAuth, asyncRoute((req, res) => {
+app.post('/api/divisions/:id/players', asyncRoute((req, res) => {
   const { playerId } = req.body;
   if (!playerId) throw new ApiError(400, 'playerId is required');
+
   const db = readDb();
   const division = db.divisions.find((d) => d.id === req.params.id);
   if (!division) throw new ApiError(404, 'Division not found');
-  if (division.entryType !== 'singles') throw new ApiError(400, 'This division is not a singles division');
-  if (division.fixturesGenerated) throw new ApiError(400, 'Fixtures have already been generated for this division');
-  const player = db.players.find((p) => p.id === playerId);
-  if (!player) throw new ApiError(404, 'Player not found');
-  const registeredUser = db.users.find((u) => u.playerId === playerId && u.status === 'active');
-  if (!registeredUser) throw new ApiError(400, 'Only registered, active accounts can be added as players');
-  if (division.playerIds.includes(playerId)) throw new ApiError(409, 'Player already in this division');
-  division.playerIds.push(playerId);
+  if (division.entryType !== 'singles') throw new ApiError(400, 'This is a team division - add players to a team instead');
+  if (division.fixturesGenerated) {
+    throw new ApiError(400, 'Cannot add players after fixtures have been generated for this division');
+  }
+
+  const player = registeredPlayers(db).find((p) => p.id === playerId);
+  if (!player) throw new ApiError(400, 'Only registered, active users can be added as players - pick a name from the list');
+  if (!division.playerIds.includes(player.id)) {
+    division.playerIds.push(player.id);
+  }
   writeDb(db);
-  res.status(201).json(division);
+  res.status(201).json(hydrateDivision(db, division));
 }));
 
-app.delete('/api/divisions/:id/players/:playerId', requireAuth, asyncRoute((req, res) => {
+app.delete('/api/divisions/:id/players/:playerId', asyncRoute((req, res) => {
   const db = readDb();
   const division = db.divisions.find((d) => d.id === req.params.id);
   if (!division) throw new ApiError(404, 'Division not found');
-  if (division.fixturesGenerated) throw new ApiError(400, 'Fixtures have already been generated for this division');
+  if (division.fixturesGenerated) {
+    throw new ApiError(400, 'Cannot remove players after fixtures have been generated for this division');
+  }
   division.playerIds = division.playerIds.filter((id) => id !== req.params.playerId);
   writeDb(db);
-  res.json(division);
+  res.json(hydrateDivision(db, division));
 }));
 
-app.post('/api/divisions/:id/teams', requireAuth, asyncRoute((req, res) => {
+// ---- Teams (team divisions only) ----
+
+app.post('/api/divisions/:id/teams', asyncRoute((req, res) => {
   const { name } = req.body;
   if (!name || !name.trim()) throw new ApiError(400, 'Team name is required');
+
   const db = readDb();
   const division = db.divisions.find((d) => d.id === req.params.id);
   if (!division) throw new ApiError(404, 'Division not found');
-  if (division.entryType !== 'teams') throw new ApiError(400, 'This division is not a teams division');
-  if (division.fixturesGenerated) throw new ApiError(400, 'Fixtures have already been generated for this division');
+  if (division.entryType !== 'teams') throw new ApiError(400, 'This is a singles division - add players directly instead');
+  if (division.fixturesGenerated) {
+    throw new ApiError(400, 'Cannot add teams after fixtures have been generated for this division');
+  }
+
   const team = { id: uuid(), divisionId: division.id, name: name.trim(), playerIds: [] };
   db.teams.push(team);
   division.teamIds.push(team.id);
   writeDb(db);
-  res.status(201).json(team);
+  res.status(201).json(hydrateDivision(db, division));
 }));
 
-app.delete('/api/divisions/:id/teams/:teamId', requireAuth, asyncRoute((req, res) => {
+app.delete('/api/divisions/:id/teams/:teamId', asyncRoute((req, res) => {
   const db = readDb();
   const division = db.divisions.find((d) => d.id === req.params.id);
   if (!division) throw new ApiError(404, 'Division not found');
-  if (division.fixturesGenerated) throw new ApiError(400, 'Fixtures have already been generated for this division');
+  if (division.fixturesGenerated) {
+    throw new ApiError(400, 'Cannot remove teams after fixtures have been generated for this division');
+  }
   division.teamIds = division.teamIds.filter((id) => id !== req.params.teamId);
-  db.teams = db.teams.filter((t) => t.id !== req.params.teamId);
   writeDb(db);
-  res.json(division);
+  res.json(hydrateDivision(db, division));
 }));
 
-app.post('/api/teams/:teamId/players', requireAuth, asyncRoute((req, res) => {
+app.post('/api/teams/:teamId/players', asyncRoute((req, res) => {
   const { playerId } = req.body;
   if (!playerId) throw new ApiError(400, 'playerId is required');
+
   const db = readDb();
   const team = db.teams.find((t) => t.id === req.params.teamId);
   if (!team) throw new ApiError(404, 'Team not found');
   const division = db.divisions.find((d) => d.id === team.divisionId);
-  if (division.fixturesGenerated) throw new ApiError(400, 'Fixtures have already been generated for this division');
-  const registeredUser = db.users.find((u) => u.playerId === playerId && u.status === 'active');
-  if (!registeredUser) throw new ApiError(400, 'Only registered, active accounts can be added as players');
-  if (team.playerIds.includes(playerId)) throw new ApiError(409, 'Player already on this team');
-  team.playerIds.push(playerId);
+  if (division.fixturesGenerated) {
+    throw new ApiError(400, 'Cannot add players once fixtures have been generated for this division');
+  }
+
+  const player = registeredPlayers(db).find((p) => p.id === playerId);
+  if (!player) throw new ApiError(400, 'Only registered, active users can be added as players - pick a name from the list');
+  if (!team.playerIds.includes(player.id)) {
+    team.playerIds.push(player.id);
+  }
   writeDb(db);
-  res.status(201).json(team);
+  res.status(201).json(hydrateDivision(db, division));
 }));
 
-app.delete('/api/teams/:teamId/players/:playerId', requireAuth, asyncRoute((req, res) => {
+app.delete('/api/teams/:teamId/players/:playerId', asyncRoute((req, res) => {
   const db = readDb();
   const team = db.teams.find((t) => t.id === req.params.teamId);
   if (!team) throw new ApiError(404, 'Team not found');
+  const division = db.divisions.find((d) => d.id === team.divisionId);
+  if (division.fixturesGenerated) {
+    throw new ApiError(400, 'Cannot remove players once fixtures have been generated for this division');
+  }
   team.playerIds = team.playerIds.filter((id) => id !== req.params.playerId);
   writeDb(db);
-  res.json(team);
+  res.json(hydrateDivision(db, division));
 }));
 
-// Stamps `scheduledDate` (YYYY-MM-DD) onto each fixture, spacing rounds
-// `gapDays` apart starting at `startDate`. Returns the date of the last
-// round's games and whether it falls on/before `endDate` (if given), so
-// callers can flag a season that won't fit its own end date.
-function assignScheduledDates(db, division, startDate, gapDays) {
-  const fixtures = db.fixtures.filter((f) => f.divisionId === division.id);
-  const rounds = [...new Set(fixtures.map((f) => f.round))].sort((a, b) => a - b);
-  const start = new Date(`${startDate}T00:00:00Z`);
-  let lastDate = startDate;
-  for (const round of rounds) {
-    const roundDate = new Date(start.getTime() + (round - 1) * gapDays * 86400000);
-    const dateStr = roundDate.toISOString().slice(0, 10);
-    lastDate = dateStr;
-    for (const fixture of fixtures.filter((f) => f.round === round)) {
-      fixture.scheduledDate = dateStr;
-    }
-  }
-  return lastDate;
+// ---- Fixture generation (branches on entryType x scheduling) ----
+
+function makeSinglesFixture({ league, division, round }) {
+  return {
+    id: uuid(),
+    leagueId: league.id,
+    divisionId: division.id,
+    round,
+    scheduledDate: null,
+    homePlayerId: null,
+    awayPlayerId: null,
+    raceTo: league.format.raceTo,
+    frames: [],
+    homeFrameScore: 0,
+    awayFrameScore: 0,
+    status: 'scheduled', // scheduled -> in_progress -> completed
+    winnerPlayerId: null,
+    nextFixtureId: null,
+    nextFixtureSlot: null,
+  };
 }
 
-app.post('/api/divisions/:id/generate-fixtures', requireAuth, asyncRoute((req, res) => {
+function makeTeamFixture({ league, division, round }) {
+  const legs = Array.from({ length: division.legsPerMatch }, (_, i) => ({
+    legNumber: i + 1,
+    homePlayerId: null,
+    awayPlayerId: null,
+    raceTo: league.format.raceTo,
+    frames: [],
+    homeFrameScore: 0,
+    awayFrameScore: 0,
+    status: 'pending', // pending (not nominated) -> scheduled -> in_progress -> completed
+    winnerPlayerId: null,
+  }));
+  return {
+    id: uuid(),
+    leagueId: league.id,
+    divisionId: division.id,
+    round,
+    scheduledDate: null,
+    homeTeamId: null,
+    awayTeamId: null,
+    legs,
+    homeLegsWon: 0,
+    awayLegsWon: 0,
+    status: 'scheduled', // scheduled -> in_progress -> completed
+    winnerTeamId: null,
+    nextFixtureId: null,
+    nextFixtureSlot: null,
+  };
+}
+
+function generateRoundRobinFixtures({ db, league, division, entrantIds }) {
+  const makeFixture = division.entryType === 'teams' ? makeTeamFixture : makeSinglesFixture;
+  const rounds = generateRoundRobin(entrantIds);
+  rounds.forEach((pairs, roundIndex) => {
+    pairs.forEach(([a, b]) => {
+      const fixture = makeFixture({ league, division, round: roundIndex + 1 });
+      if (division.entryType === 'teams') {
+        fixture.homeTeamId = a;
+        fixture.awayTeamId = b;
+      } else {
+        fixture.homePlayerId = a;
+        fixture.awayPlayerId = b;
+      }
+      db.fixtures.push(fixture);
+    });
+  });
+}
+
+// Marks a bye fixture (one side missing) as an automatic win, and propagates
+// the winner into the next round straight away.
+function resolveByeIfNeeded(db, division, fixture) {
+  if (division.entryType === 'teams') {
+    if (fixture.homeTeamId && fixture.awayTeamId) return;
+    const winnerTeamId = fixture.homeTeamId || fixture.awayTeamId;
+    if (!winnerTeamId) return; // shouldn't happen, but don't crash on a fully-empty fixture
+    fixture.status = 'completed';
+    fixture.winnerTeamId = winnerTeamId;
+    propagateWinner(db, division, fixture, winnerTeamId);
+  } else {
+    if (fixture.homePlayerId && fixture.awayPlayerId) return;
+    const winnerPlayerId = fixture.homePlayerId || fixture.awayPlayerId;
+    if (!winnerPlayerId) return;
+    fixture.status = 'completed';
+    fixture.winnerPlayerId = winnerPlayerId;
+    propagateWinner(db, division, fixture, winnerPlayerId);
+  }
+}
+
+function propagateWinner(db, division, fixture, winnerId) {
+  if (!fixture.nextFixtureId) return;
+  const next = db.fixtures.find((f) => f.id === fixture.nextFixtureId);
+  if (!next) return;
+  if (division.entryType === 'teams') {
+    if (fixture.nextFixtureSlot === 'home') next.homeTeamId = winnerId;
+    else next.awayTeamId = winnerId;
+  } else if (fixture.nextFixtureSlot === 'home') {
+    next.homePlayerId = winnerId;
+  } else {
+    next.awayPlayerId = winnerId;
+  }
+  // NB: do NOT call resolveByeIfNeeded here. A bye (a slot that will never be
+  // filled) can only ever occur in the very first round, where the bracket
+  // was seeded with an uneven entrant count - that's resolved once, right
+  // after seeding. From round 2 onward, a slot being empty just means "the
+  // other semi-final hasn't been played yet", not a bye - filling one side of
+  // a two-sided fixture must never auto-declare a winner. The match still has
+  // to be played once both real entrants have arrived.
+}
+
+function generateKnockoutFixtures({ db, league, division, entrantIds }) {
+  const makeFixture = division.entryType === 'teams' ? makeTeamFixture : makeSinglesFixture;
+  const bracketRounds = buildBracketRounds(entrantIds); // rounds[0] has real entrants (nulls = byes); later rounds are just counts
+
+  const fixturesByRound = bracketRounds.map((pairs, roundIndex) =>
+    pairs.map(() => makeFixture({ league, division, round: roundIndex + 1 }))
+  );
+
+  // Link each fixture to the one its winner advances to.
+  for (let round = 0; round < fixturesByRound.length - 1; round++) {
+    fixturesByRound[round].forEach((fixture, i) => {
+      const next = fixturesByRound[round + 1][Math.floor(i / 2)];
+      fixture.nextFixtureId = next.id;
+      fixture.nextFixtureSlot = i % 2 === 0 ? 'home' : 'away';
+    });
+  }
+
+  // Seed round 1 with the real entrants.
+  bracketRounds[0].forEach(([a, b], i) => {
+    const fixture = fixturesByRound[0][i];
+    if (division.entryType === 'teams') {
+      fixture.homeTeamId = a;
+      fixture.awayTeamId = b;
+    } else {
+      fixture.homePlayerId = a;
+      fixture.awayPlayerId = b;
+    }
+  });
+
+  const allFixtures = fixturesByRound.flat();
+  allFixtures.forEach((f) => db.fixtures.push(f));
+  // Resolve any byes now that every fixture (and its next-round link) exists.
+  fixturesByRound[0].forEach((fixture) => resolveByeIfNeeded(db, division, fixture));
+}
+
+// Assigns a `scheduledDate` (YYYY-MM-DD) to every fixture in a division,
+// spacing rounds `gapDays` apart starting at `startDate` - this is what the
+// season wizard's "gap between games" step controls. Not used for knockout
+// divisions with byes in a way that's aware of walkover timing; it just
+// spaces round N at startDate + (N-1)*gapDays, which is the right behaviour
+// for round robin (every division the wizard creates) and a reasonable
+// default for knockout too.
+function assignScheduledDates(db, division, startDate, gapDays) {
+  if (!startDate || !gapDays) return;
+  const base = new Date(`${startDate}T00:00:00`);
+  const fixtures = db.fixtures.filter((f) => f.divisionId === division.id);
+  for (const fixture of fixtures) {
+    const date = new Date(base);
+    date.setDate(date.getDate() + (fixture.round - 1) * Number(gapDays));
+    fixture.scheduledDate = date.toISOString().slice(0, 10);
+  }
+}
+
+app.post('/api/divisions/:id/generate-fixtures', asyncRoute((req, res) => {
+  const { startDate, gapDays } = req.body || {};
   const db = readDb();
   const division = db.divisions.find((d) => d.id === req.params.id);
   if (!division) throw new ApiError(404, 'Division not found');
-  if (division.fixturesGenerated) throw new ApiError(400, 'Fixtures have already been generated for this division');
+  const league = db.leagues.find((l) => l.id === division.leagueId);
+  if (division.fixturesGenerated) {
+    throw new ApiError(400, 'Fixtures have already been generated for this division');
+  }
 
-  let newFixtures;
-  if (division.scheduling === 'round_robin_single') {
-    newFixtures = generateRoundRobinFixtures(division);
+  const entrantIds = division.entryType === 'teams' ? division.teamIds : division.playerIds;
+  const entrantLabel = division.entryType === 'teams' ? 'teams' : 'players';
+  if (entrantIds.length < 2) {
+    throw new ApiError(400, `A division needs at least 2 ${entrantLabel} before fixtures can be generated`);
+  }
+
+  if (division.scheduling === 'knockout_single_elim') {
+    generateKnockoutFixtures({ db, league, division, entrantIds });
   } else {
-    newFixtures = generateBracket(division);
+    generateRoundRobinFixtures({ db, league, division, entrantIds });
   }
-  db.fixtures.push(...newFixtures);
-  division.fixturesGenerated = true;
 
-  const { startDate, gapDays } = req.body || {};
-  let lastGameDate = null;
   if (startDate && gapDays) {
-    division.startDate = startDate;
     division.gapDays = Number(gapDays);
-    lastGameDate = assignScheduledDates(db, division, startDate, Number(gapDays));
+    assignScheduledDates(db, division, startDate, gapDays);
   }
 
+  division.fixturesGenerated = true;
   writeDb(db);
-  res.status(201).json({ division, fixtures: newFixtures, lastGameDate });
+  res.status(201).json(hydrateDivision(db, division));
 }));
 
-// ---------- Fixtures: singles ----------
-
-function enrichSinglesFixture(db, fixture) {
-  const homePlayer = db.players.find((p) => p.id === fixture.homePlayerId) || null;
-  const awayPlayer = db.players.find((p) => p.id === fixture.awayPlayerId) || null;
-  return {
-    ...fixture,
-    homePlayer,
-    awayPlayer,
-    bothEntrantsKnown: !!(fixture.homePlayerId && fixture.awayPlayerId),
-  };
-}
-
-function enrichTeamFixture(db, fixture) {
-  const homeTeam = db.teams.find((t) => t.id === fixture.homeTeamId) || null;
-  const awayTeam = db.teams.find((t) => t.id === fixture.awayTeamId) || null;
-  return {
-    ...fixture,
-    homeTeam,
-    awayTeam,
-    bothEntrantsKnown: !!(fixture.homeTeamId && fixture.awayTeamId),
-  };
-}
+// ---------- Fixtures / frame scoring (singles) ----------
 
 app.get('/api/fixtures/:id', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
   const fixture = db.fixtures.find((f) => f.id === req.params.id);
   if (!fixture) throw new ApiError(404, 'Fixture not found');
   const division = db.divisions.find((d) => d.id === fixture.divisionId);
-  if (division.entryType === 'singles') {
-    res.json(enrichSinglesFixture(db, fixture));
-  } else {
-    res.json(enrichTeamFixture(db, fixture));
+  const divisionName = division ? division.name : null;
+
+  if (division.entryType === 'teams') {
+    const withPlayers = (team) => (team ? { ...team, players: db.players.filter((p) => team.playerIds.includes(p.id)) } : null);
+    const homeTeam = withPlayers(db.teams.find((t) => t.id === fixture.homeTeamId));
+    const awayTeam = withPlayers(db.teams.find((t) => t.id === fixture.awayTeamId));
+    const legs = fixture.legs.map((leg) => ({
+      ...leg,
+      homePlayer: leg.homePlayerId ? db.players.find((p) => p.id === leg.homePlayerId) : null,
+      awayPlayer: leg.awayPlayerId ? db.players.find((p) => p.id === leg.awayPlayerId) : null,
+    }));
+    return res.json({ ...fixture, divisionName, legs, homeTeam, awayTeam, bothEntrantsKnown: !!(fixture.homeTeamId && fixture.awayTeamId) });
   }
+
+  const homePlayer = fixture.homePlayerId ? db.players.find((p) => p.id === fixture.homePlayerId) : null;
+  const awayPlayer = fixture.awayPlayerId ? db.players.find((p) => p.id === fixture.awayPlayerId) : null;
+  res.json({ ...fixture, divisionName, homePlayer, awayPlayer, bothEntrantsKnown: !!(fixture.homePlayerId && fixture.awayPlayerId) });
 }));
 
-app.post('/api/fixtures/:id/frames', requireAuth, asyncRoute((req, res) => {
+app.post('/api/fixtures/:id/frames', asyncRoute((req, res) => {
   const { winnerPlayerId } = req.body;
-  if (!winnerPlayerId) throw new ApiError(400, 'winnerPlayerId is required');
   const db = readDb();
   const fixture = db.fixtures.find((f) => f.id === req.params.id);
   if (!fixture) throw new ApiError(404, 'Fixture not found');
-  if (fixture.status === 'completed') throw new ApiError(400, 'This fixture is already completed');
+  const division = db.divisions.find((d) => d.id === fixture.divisionId);
+  if (division.entryType === 'teams') {
+    throw new ApiError(400, 'This is a team fixture - record frames against a specific leg instead');
+  }
+  if (!fixture.homePlayerId || !fixture.awayPlayerId) {
+    throw new ApiError(400, 'Both players for this fixture are not yet known - waiting on an earlier round');
+  }
+  if (fixture.status === 'completed') {
+    throw new ApiError(400, `Match is already complete (${fixture.homeFrameScore}-${fixture.awayFrameScore}). Undo a frame to make corrections.`);
+  }
   if (![fixture.homePlayerId, fixture.awayPlayerId].includes(winnerPlayerId)) {
     throw new ApiError(400, 'winnerPlayerId must be one of the two players in this fixture');
   }
@@ -561,66 +760,123 @@ app.post('/api/fixtures/:id/frames', requireAuth, asyncRoute((req, res) => {
   fixture.frames.push({ frameNumber: fixture.frames.length + 1, winnerPlayerId });
   fixture.homeFrameScore = fixture.frames.filter((f) => f.winnerPlayerId === fixture.homePlayerId).length;
   fixture.awayFrameScore = fixture.frames.filter((f) => f.winnerPlayerId === fixture.awayPlayerId).length;
+  fixture.status = 'in_progress';
 
-  if (fixture.homeFrameScore >= fixture.raceTo || fixture.awayFrameScore >= fixture.raceTo) {
+  if (fixture.homeFrameScore >= fixture.raceTo) {
     fixture.status = 'completed';
-    fixture.winnerPlayerId = fixture.homeFrameScore > fixture.awayFrameScore ? fixture.homePlayerId : fixture.awayPlayerId;
-    if (fixture.nextFixtureId) {
-      applyBracketResult(db, fixture);
-    }
+    fixture.winnerPlayerId = fixture.homePlayerId;
+  } else if (fixture.awayFrameScore >= fixture.raceTo) {
+    fixture.status = 'completed';
+    fixture.winnerPlayerId = fixture.awayPlayerId;
+  }
+
+  if (fixture.status === 'completed') {
+    propagateWinner(db, division, fixture, fixture.winnerPlayerId);
   }
 
   writeDb(db);
-  res.json(enrichSinglesFixture(db, fixture));
+  res.json(fixture);
 }));
 
-app.delete('/api/fixtures/:id/frames/last', requireAuth, asyncRoute((req, res) => {
+app.delete('/api/fixtures/:id/frames/last', asyncRoute((req, res) => {
   const db = readDb();
   const fixture = db.fixtures.find((f) => f.id === req.params.id);
   if (!fixture) throw new ApiError(404, 'Fixture not found');
-  if (fixture.frames.length === 0) throw new ApiError(400, 'No frames to undo');
-  if (fixture.status === 'completed' && fixture.nextFixtureId) {
-    const nextFixture = db.fixtures.find((f) => f.id === fixture.nextFixtureId);
-    const advanced = nextFixture && (nextFixture.homePlayerId === fixture.winnerPlayerId || nextFixture.awayPlayerId === fixture.winnerPlayerId || nextFixture.frames?.length > 0);
-    if (advanced) throw new ApiError(400, "Can't undo - this result has already advanced the bracket");
+  if (fixture.frames.length === 0) throw new ApiError(400, 'No frames recorded yet');
+  if (fixture.nextFixtureId && fixture.status === 'completed') {
+    throw new ApiError(400, 'This result has already advanced a player to the next round and cannot be undone here');
   }
 
   fixture.frames.pop();
   fixture.homeFrameScore = fixture.frames.filter((f) => f.winnerPlayerId === fixture.homePlayerId).length;
   fixture.awayFrameScore = fixture.frames.filter((f) => f.winnerPlayerId === fixture.awayPlayerId).length;
-  if (fixture.homeFrameScore < fixture.raceTo && fixture.awayFrameScore < fixture.raceTo) {
-    fixture.status = fixture.frames.length > 0 ? 'in_progress' : 'scheduled';
-    fixture.winnerPlayerId = null;
-  }
+  fixture.winnerPlayerId = null;
+  fixture.status = fixture.frames.length === 0 ? 'scheduled' : 'in_progress';
+
   writeDb(db);
-  res.json(enrichSinglesFixture(db, fixture));
+  res.json(fixture);
 }));
 
-// ---------- Fixtures: teams (legs) ----------
+// ---------- Fixtures / leg scoring (teams) ----------
+// A team match is decided the moment one side has won a majority of
+// `legsPerMatch` legs (mirrors the singles "race to N" behaviour - once
+// decided, no further legs are scored). With an odd legsPerMatch this always
+// produces a winner; an even legsPerMatch can end level, which is recorded
+// as a drawn team match once every leg is complete. A drawn knockout match
+// has no winner to advance - use an odd legsPerMatch for knockout team
+// divisions to guarantee one.
 
-app.post('/api/fixtures/:id/legs/:legNumber/nominate', requireAuth, asyncRoute((req, res) => {
+function recomputeTeamFixture(db, division, fixture) {
+  const homeLegsWon = fixture.legs.filter((l) => l.status === 'completed' && l.winnerPlayerId === l.homePlayerId).length;
+  const awayLegsWon = fixture.legs.filter((l) => l.status === 'completed' && l.winnerPlayerId === l.awayPlayerId).length;
+  fixture.homeLegsWon = homeLegsWon;
+  fixture.awayLegsWon = awayLegsWon;
+
+  const totalLegs = fixture.legs.length;
+  const majority = Math.floor(totalLegs / 2) + 1;
+  const allLegsDone = fixture.legs.every((l) => l.status === 'completed');
+  const wasCompleted = fixture.status === 'completed';
+
+  if (homeLegsWon >= majority) {
+    fixture.status = 'completed';
+    fixture.winnerTeamId = fixture.homeTeamId;
+  } else if (awayLegsWon >= majority) {
+    fixture.status = 'completed';
+    fixture.winnerTeamId = fixture.awayTeamId;
+  } else if (allLegsDone) {
+    fixture.status = 'completed';
+    fixture.winnerTeamId = homeLegsWon === awayLegsWon ? null : (homeLegsWon > awayLegsWon ? fixture.homeTeamId : fixture.awayTeamId);
+  } else {
+    fixture.status = fixture.legs.some((l) => l.status !== 'pending') ? 'in_progress' : 'scheduled';
+    fixture.winnerTeamId = null;
+  }
+
+  if (!wasCompleted && fixture.status === 'completed' && fixture.winnerTeamId) {
+    propagateWinner(db, division, fixture, fixture.winnerTeamId);
+  }
+}
+
+function findTeamFixtureAndLeg(db, fixtureId, legNumber) {
+  const fixture = db.fixtures.find((f) => f.id === fixtureId);
+  if (!fixture || !fixture.legs) throw new ApiError(404, 'Team fixture not found');
+  const leg = fixture.legs.find((l) => l.legNumber === Number(legNumber));
+  if (!leg) throw new ApiError(404, 'Leg not found');
+  return { fixture, leg };
+}
+
+app.post('/api/fixtures/:id/legs/:legNumber/nominate', asyncRoute((req, res) => {
   const { homePlayerId, awayPlayerId } = req.body;
   const db = readDb();
-  const fixture = db.fixtures.find((f) => f.id === req.params.id);
-  if (!fixture) throw new ApiError(404, 'Fixture not found');
-  const leg = fixture.legs.find((l) => l.legNumber === Number(req.params.legNumber));
-  if (!leg) throw new ApiError(404, 'Leg not found');
-  if (leg.status !== 'pending') throw new ApiError(400, 'This leg has already started or completed');
+  const { fixture, leg } = findTeamFixtureAndLeg(db, req.params.id, req.params.legNumber);
+  if (!fixture.homeTeamId || !fixture.awayTeamId) {
+    throw new ApiError(400, 'Both teams for this fixture are not yet known - waiting on an earlier round');
+  }
+  if (leg.status !== 'pending') {
+    throw new ApiError(400, 'This leg already has nominated players - undo its frames first to change them');
+  }
+
+  const homeTeam = db.teams.find((t) => t.id === fixture.homeTeamId);
+  const awayTeam = db.teams.find((t) => t.id === fixture.awayTeamId);
+  if (!homeTeam.playerIds.includes(homePlayerId)) throw new ApiError(400, 'Home player is not registered to the home team');
+  if (!awayTeam.playerIds.includes(awayPlayerId)) throw new ApiError(400, 'Away player is not registered to the away team');
+
   leg.homePlayerId = homePlayerId;
   leg.awayPlayerId = awayPlayerId;
   leg.status = 'scheduled';
   writeDb(db);
-  res.json(enrichTeamFixture(db, fixture));
+  res.json(fixture);
 }));
 
-app.post('/api/fixtures/:id/legs/:legNumber/frames', requireAuth, asyncRoute((req, res) => {
+app.post('/api/fixtures/:id/legs/:legNumber/frames', asyncRoute((req, res) => {
   const { winnerPlayerId } = req.body;
   const db = readDb();
-  const fixture = db.fixtures.find((f) => f.id === req.params.id);
-  if (!fixture) throw new ApiError(404, 'Fixture not found');
-  const leg = fixture.legs.find((l) => l.legNumber === Number(req.params.legNumber));
-  if (!leg) throw new ApiError(404, 'Leg not found');
-  if (leg.status === 'completed') throw new ApiError(400, 'This leg is already completed');
+  const { fixture, leg } = findTeamFixtureAndLeg(db, req.params.id, req.params.legNumber);
+  const division = db.divisions.find((d) => d.id === fixture.divisionId);
+  if (fixture.status === 'completed') throw new ApiError(400, 'This team match is already decided');
+  if (leg.status === 'pending') throw new ApiError(400, 'Nominate both players for this leg before recording frames');
+  if (leg.status === 'completed') {
+    throw new ApiError(400, `This leg is already complete (${leg.homeFrameScore}-${leg.awayFrameScore}). Undo a frame to make corrections.`);
+  }
   if (![leg.homePlayerId, leg.awayPlayerId].includes(winnerPlayerId)) {
     throw new ApiError(400, 'winnerPlayerId must be one of the two nominated players for this leg');
   }
@@ -630,130 +886,136 @@ app.post('/api/fixtures/:id/legs/:legNumber/frames', requireAuth, asyncRoute((re
   leg.awayFrameScore = leg.frames.filter((f) => f.winnerPlayerId === leg.awayPlayerId).length;
   leg.status = 'in_progress';
 
-  if (leg.homeFrameScore >= leg.raceTo || leg.awayFrameScore >= leg.raceTo) {
+  if (leg.homeFrameScore >= leg.raceTo) {
     leg.status = 'completed';
-    leg.winnerPlayerId = leg.homeFrameScore > leg.awayFrameScore ? leg.homePlayerId : leg.awayPlayerId;
+    leg.winnerPlayerId = leg.homePlayerId;
+  } else if (leg.awayFrameScore >= leg.raceTo) {
+    leg.status = 'completed';
+    leg.winnerPlayerId = leg.awayPlayerId;
   }
 
-  fixture.homeLegsWon = fixture.legs.filter((l) => l.winnerPlayerId === leg.homePlayerId && l.status === 'completed').length;
-  // Recompute leg tallies properly based on team, not just this leg's players:
-  fixture.homeLegsWon = fixture.legs.filter((l) => l.status === 'completed' && isLegWinnerOnSide(fixture, l, 'home')).length;
-  fixture.awayLegsWon = fixture.legs.filter((l) => l.status === 'completed' && isLegWinnerOnSide(fixture, l, 'away')).length;
-
-  const totalLegs = fixture.legs.length;
-  const remainingLegs = fixture.legs.filter((l) => l.status !== 'completed').length;
-  const majority = Math.floor(totalLegs / 2) + 1;
-
-  if (fixture.homeLegsWon >= majority || fixture.awayLegsWon >= majority) {
-    fixture.status = 'completed';
-    fixture.winnerTeamId = fixture.homeLegsWon > fixture.awayLegsWon ? fixture.homeTeamId : fixture.awayTeamId;
-    if (fixture.nextFixtureId) applyBracketResult(db, fixture);
-  } else if (remainingLegs === 0) {
-    fixture.status = 'completed';
-    if (fixture.homeLegsWon === fixture.awayLegsWon) {
-      fixture.winnerTeamId = null; // draw
-    } else {
-      fixture.winnerTeamId = fixture.homeLegsWon > fixture.awayLegsWon ? fixture.homeTeamId : fixture.awayTeamId;
-      if (fixture.nextFixtureId) applyBracketResult(db, fixture);
-    }
-  }
-
+  recomputeTeamFixture(db, division, fixture);
   writeDb(db);
-  res.json(enrichTeamFixture(db, fixture));
+  res.json(fixture);
 }));
 
-function isLegWinnerOnSide(fixture, leg, side) {
-  if (!leg.winnerPlayerId) return false;
-  const homeTeam = null; // placeholder, replaced by lookup at call site if needed
-  return side === 'home' ? leg.winnerPlayerId === leg.homePlayerId : leg.winnerPlayerId === leg.awayPlayerId;
-}
-
-app.delete('/api/fixtures/:id/legs/:legNumber/frames/last', requireAuth, asyncRoute((req, res) => {
+app.delete('/api/fixtures/:id/legs/:legNumber/frames/last', asyncRoute((req, res) => {
   const db = readDb();
-  const fixture = db.fixtures.find((f) => f.id === req.params.id);
-  if (!fixture) throw new ApiError(404, 'Fixture not found');
-  const leg = fixture.legs.find((l) => l.legNumber === Number(req.params.legNumber));
-  if (!leg) throw new ApiError(404, 'Leg not found');
-  if (leg.frames.length === 0) throw new ApiError(400, 'No frames to undo');
-  if (fixture.status === 'completed' && fixture.nextFixtureId) {
-    throw new ApiError(400, "Can't undo - this result has already advanced the bracket");
+  const { fixture, leg } = findTeamFixtureAndLeg(db, req.params.id, req.params.legNumber);
+  const division = db.divisions.find((d) => d.id === fixture.divisionId);
+  if (leg.frames.length === 0) throw new ApiError(400, 'No frames recorded yet for this leg');
+  if (fixture.nextFixtureId && fixture.status === 'completed') {
+    throw new ApiError(400, 'This result has already advanced a team to the next round and cannot be undone here');
   }
 
   leg.frames.pop();
   leg.homeFrameScore = leg.frames.filter((f) => f.winnerPlayerId === leg.homePlayerId).length;
   leg.awayFrameScore = leg.frames.filter((f) => f.winnerPlayerId === leg.awayPlayerId).length;
-  if (leg.homeFrameScore < leg.raceTo && leg.awayFrameScore < leg.raceTo) {
-    leg.status = leg.frames.length > 0 ? 'in_progress' : 'scheduled';
-    leg.winnerPlayerId = null;
-  }
-  fixture.status = 'in_progress';
-  fixture.winnerTeamId = null;
-  fixture.homeLegsWon = fixture.legs.filter((l) => l.status === 'completed' && isLegWinnerOnSide(fixture, l, 'home')).length;
-  fixture.awayLegsWon = fixture.legs.filter((l) => l.status === 'completed' && isLegWinnerOnSide(fixture, l, 'away')).length;
+  leg.winnerPlayerId = null;
+  leg.status = leg.frames.length === 0 ? 'scheduled' : 'in_progress';
+
+  recomputeTeamFixture(db, division, fixture);
   writeDb(db);
-  res.json(enrichTeamFixture(db, fixture));
+  res.json(fixture);
 }));
 
-// ---------- Admin: score override ----------
-
+// ---------- Admin score/game override ----------
+// Lets an admin directly set a fixture's final score to correct a
+// mis-recorded result, bypassing the normal frame-by-frame flow entirely.
+// Deliberately blunt: it replaces the recorded frames/legs with just the
+// final tally (tagged `adminOverride` so the UI can show it was hand-set
+// rather than played out), rather than trying to reconstruct a plausible
+// frame history. Re-propagates into the next knockout round if the winner
+// changed, but refuses if that would silently overwrite a match that's
+// already been played - the admin has to fix the downstream fixture first,
+// so a correction can never quietly erase someone else's recorded result.
 app.post('/api/fixtures/:id/override', requireAdmin, asyncRoute((req, res) => {
   const { homeScore, awayScore } = req.body;
-  if (!Number.isInteger(homeScore) || !Number.isInteger(awayScore) || homeScore < 0 || awayScore < 0) {
-    throw new ApiError(400, 'homeScore and awayScore must be non-negative integers');
-  }
   const db = readDb();
   const fixture = db.fixtures.find((f) => f.id === req.params.id);
   if (!fixture) throw new ApiError(404, 'Fixture not found');
+  const division = db.divisions.find((d) => d.id === fixture.divisionId);
+  const isTeams = division.entryType === 'teams';
 
-  const isTeam = fixture.legs !== undefined;
-  const currentHome = isTeam ? fixture.homeLegsWon : fixture.homeFrameScore;
-  const currentAway = isTeam ? fixture.awayLegsWon : fixture.awayFrameScore;
-  const currentWinner = isTeam ? fixture.winnerTeamId : fixture.winnerPlayerId;
-  const newWinner = homeScore === awayScore ? null : (homeScore > awayScore
-    ? (isTeam ? fixture.homeTeamId : fixture.homePlayerId)
-    : (isTeam ? fixture.awayTeamId : fixture.awayPlayerId));
+  if (isTeams) {
+    if (!fixture.homeTeamId || !fixture.awayTeamId) {
+      throw new ApiError(400, 'Both teams for this fixture are not yet known');
+    }
+  } else if (!fixture.homePlayerId || !fixture.awayPlayerId) {
+    throw new ApiError(400, 'Both players for this fixture are not yet known');
+  }
+  if (!Number.isInteger(homeScore) || !Number.isInteger(awayScore) || homeScore < 0 || awayScore < 0) {
+    throw new ApiError(400, 'homeScore and awayScore must be non-negative whole numbers');
+  }
+  if (!isTeams && homeScore === awayScore) {
+    throw new ApiError(400, 'Singles matches cannot end level - set different scores for home and away');
+  }
 
-  if (fixture.nextFixtureId && currentWinner && newWinner !== currentWinner) {
-    const nextFixture = db.fixtures.find((f) => f.id === fixture.nextFixtureId);
-    const advanced = nextFixture && ((nextFixture.homePlayerId === currentWinner || nextFixture.awayPlayerId === currentWinner ||
-      nextFixture.homeTeamId === currentWinner || nextFixture.awayTeamId === currentWinner) &&
-      (nextFixture.frames?.length > 0 || nextFixture.legs?.some((l) => l.frames?.length > 0)));
-    if (advanced) {
-      throw new ApiError(400, "Can't change the winner - this result has already advanced the bracket");
+  const oldWinnerId = isTeams ? fixture.winnerTeamId : fixture.winnerPlayerId;
+  const newWinnerId = homeScore === awayScore
+    ? null
+    : homeScore > awayScore
+      ? (isTeams ? fixture.homeTeamId : fixture.homePlayerId)
+      : (isTeams ? fixture.awayTeamId : fixture.awayPlayerId);
+
+  if (fixture.nextFixtureId && oldWinnerId && newWinnerId !== oldWinnerId) {
+    const next = db.fixtures.find((f) => f.id === fixture.nextFixtureId);
+    const nextHasStarted = next && (isTeams ? next.legs.some((l) => l.status !== 'pending') : next.frames.length > 0);
+    if (nextHasStarted) {
+      throw new ApiError(409, 'This result has already progressed to a fixture that has started - override or reset that fixture first');
     }
   }
 
-  if (isTeam) {
+  if (isTeams) {
     fixture.homeLegsWon = homeScore;
     fixture.awayLegsWon = awayScore;
-    fixture.winnerTeamId = newWinner;
+    fixture.winnerTeamId = newWinnerId;
+    fixture.legs = fixture.legs.map((leg) => ({
+      ...leg,
+      homePlayerId: null,
+      awayPlayerId: null,
+      frames: [],
+      homeFrameScore: 0,
+      awayFrameScore: 0,
+      status: 'pending',
+      winnerPlayerId: null,
+    }));
   } else {
     fixture.homeFrameScore = homeScore;
     fixture.awayFrameScore = awayScore;
-    fixture.winnerPlayerId = newWinner;
+    fixture.frames = [];
+    fixture.winnerPlayerId = newWinnerId;
   }
   fixture.status = 'completed';
-  if (fixture.nextFixtureId && newWinner) applyBracketResult(db, fixture);
+  fixture.adminOverride = { at: new Date().toISOString(), by: req.adminSession.label };
+
+  if (fixture.nextFixtureId && newWinnerId && newWinnerId !== oldWinnerId) {
+    propagateWinner(db, division, fixture, newWinnerId);
+  }
 
   recordAudit(db, {
     actor: req.adminSession.label,
     action: 'fixture.override',
     targetType: 'fixture',
     targetId: fixture.id,
-    details: `Set score to ${homeScore}-${awayScore} (was ${currentHome}-${currentAway})`,
+    details: `Set final score to ${homeScore}-${awayScore}`,
   });
 
   writeDb(db);
   res.json(fixture);
 }));
 
-// ---------- Player profiles ----------
+// ---------- Players ----------
+
+app.get('/api/players', requireAuth, asyncRoute((req, res) => {
+  const db = readDb();
+  res.json(db.players);
+}));
 
 app.get('/api/players/:id', requireAuth, asyncRoute((req, res) => {
   const db = readDb();
-  const player = db.players.find((p) => p.id === req.params.id);
-  if (!player) throw new ApiError(404, 'Player not found');
-  const profile = computePlayerProfile(db, player);
+  const profile = buildPlayerProfile(db, req.params.id);
+  if (!profile) throw new ApiError(404, 'Player not found');
   res.json(profile);
 }));
 
@@ -960,16 +1222,26 @@ app.get('/api/admin/audit-log', requireAdmin, asyncRoute((req, res) => {
 
 app.get('/api/venues', asyncRoute((req, res) => {
   const db = readDb();
-  res.json(db.venues.filter((v) => v.status === 'approved'));
+  const approved = db.venues
+    .filter((v) => v.status === 'approved')
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : null;
+  const session = token ? verifySessionToken(token) : null;
+  const mine = session
+    ? db.venues.filter((v) => v.requestedBy === session.userId && v.status !== 'approved')
+    : [];
+
+  res.json({ approved, mine });
 }));
 
 app.get('/api/admin/venues', requireAdmin, asyncRoute((req, res) => {
   const db = readDb();
-  const venues = [...db.venues].sort((a, b) => {
-    if (a.status === 'pending' && b.status !== 'pending') return -1;
-    if (a.status !== 'pending' && b.status === 'pending') return 1;
-    return a.name.localeCompare(b.name);
-  });
+  const statusOrder = { pending: 0, approved: 1, rejected: 2 };
+  const venues = [...db.venues].sort((a, b) =>
+    statusOrder[a.status] - statusOrder[b.status] || a.name.localeCompare(b.name)
+  );
   res.json(venues);
 }));
 
@@ -1160,6 +1432,10 @@ app.post('/api/admin/seasons/:leagueId/generate', requireAdmin, asyncRoute((req,
   if (!Number.isInteger(Number(gapDays)) || Number(gapDays) < 1) {
     throw new ApiError(400, 'gapDays must be a positive whole number of days between rounds');
   }
+  if (new Date(endDate) < new Date(startDate)) {
+    throw new ApiError(400, 'endDate cannot be before startDate');
+  }
+
   const db = readDb();
   const league = db.leagues.find((l) => l.id === req.params.leagueId);
   if (!league) throw new ApiError(404, 'Season not found');
@@ -1176,44 +1452,50 @@ app.post('/api/admin/seasons/:leagueId/generate', requireAdmin, asyncRoute((req,
       continue;
     }
     if (division.playerIds.length < 2) {
-      skipped.push({ division: division.name, reason: `only ${division.playerIds.length} player(s) registered - needs at least 2` });
+      skipped.push({ division: division.name, reason: `only ${division.playerIds.length} player(s) - needs at least 2` });
       continue;
     }
-    const newFixtures = generateRoundRobinFixtures(division);
-    db.fixtures.push(...newFixtures);
-    division.fixturesGenerated = true;
-    division.startDate = startDate;
-    division.endDate = endDate;
+    generateRoundRobinFixtures({ db, league, division, entrantIds: division.playerIds });
     division.gapDays = Number(gapDays);
-    const lastGameDate = assignScheduledDates(db, division, startDate, Number(gapDays));
+    assignScheduledDates(db, division, startDate, gapDays);
+    division.fixturesGenerated = true;
+
+    const divisionFixtures = db.fixtures.filter((f) => f.divisionId === division.id);
+    const lastRound = Math.max(...divisionFixtures.map((f) => f.round));
+    const lastRoundDate = divisionFixtures.find((f) => f.round === lastRound)?.scheduledDate;
     generated.push({
       division: division.name,
       players: division.playerIds.length,
-      rounds: [...new Set(newFixtures.map((f) => f.round))].length,
-      lastGameDate,
-      fitsWithinEndDate: lastGameDate <= endDate,
+      rounds: lastRound,
+      lastGameDate: lastRoundDate,
+      fitsWithinEndDate: !lastRoundDate || lastRoundDate <= endDate,
     });
   }
 
   writeDb(db);
-  res.json({ league, generated, skipped });
+  res.status(201).json({ league: { id: league.id, name: league.name, startDate, endDate }, generated, skipped });
 }));
 
-// ---------- Static frontend ----------
+app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
-const clientDist = path.join(__dirname, '..', '..', 'client', 'dist');
-app.use(express.static(clientDist));
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api/')) return next();
-  res.sendFile(path.join(clientDist, 'index.html'));
-});
+// ---------- Serve the built React client, if present ----------
+// (`npm run build` in /client produces /client/dist; when present we serve
+// it here so the whole app runs from a single `npm start` on one port. In
+// local development, run the Vite dev server separately instead - see
+// README - so you get hot reload.)
+if (existsSync(CLIENT_DIST)) {
+  app.use(express.static(CLIENT_DIST));
+  app.get(/^\/(?!api).*/, (req, res) => {
+    res.sendFile(path.join(CLIENT_DIST, 'index.html'));
+  });
+}
+
+// ---------- Error handling ----------
 
 app.use((err, req, res, next) => {
-  if (err instanceof ApiError) {
-    return res.status(err.status).json({ error: err.message });
-  }
-  console.error(err);
-  res.status(500).json({ error: 'Internal server error' });
+  const status = err instanceof ApiError ? err.status : 500;
+  if (status === 500) console.error(err);
+  res.status(status).json({ error: err.message || 'Internal server error' });
 });
 
 const PORT = process.env.PORT || 4000;
