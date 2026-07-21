@@ -22,6 +22,7 @@ const EMPTY_STATE = {
   teams: [],
   divisionPlayers: [],
   fixtures: [],
+  users: [],
 };
 
 function ensureDataFile() {
@@ -35,8 +36,9 @@ export function readDb() {
   ensureDataFile();
   const raw = readFileSync(DATA_FILE, 'utf-8');
   const state = JSON.parse(raw);
-  // Backfill for databases created before `teams` existed.
+  // Backfill for databases created before `teams`/`users` existed.
   if (!state.teams) state.teams = [];
+  if (!state.users) state.users = [];
   return state;
 }
 

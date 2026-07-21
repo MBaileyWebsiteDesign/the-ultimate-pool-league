@@ -1,42 +1,10 @@
 # The Ultimate Pool League
 
 A self-hosted pool league management platform: admins create leagues, divisions and
-players; the app schedules a single round-robin fixture list per division; captains or
-admins record match results frame-by-frame; standings update automatically. Built as a
-replacement for [RackEmApp](https://www.rackemapp.com/) because Wix has no equivalent
-built-in system for running a real pool league.
-
-This is not affiliated with, endorsed by, or a copy of RackEmApp's code or design — it's
-an independent implementation of the subset of functionality needed to run our own
-league, informed by an assessment of what RackEmApp offers (below).
-
-## Assessment of RackEmApp
-
-RackEmApp (rackemapp.com) is a mature, single-developer SaaS product aimed at English
-8-ball pool leagues, competition organizers, streamers and venues. Its published feature
-set is broad: automated free websites per league, electronic scorecards submitted by
-captains, live scores and in-play scorecards, flexible season/division/points
-configuration, smart fixture generation that avoids table clashes, a full competition
-engine (round robin groups, single/double elimination, mini-knockouts, mixed formats,
-handicaps), tablet scoring, stream overlays with shot/match timers and StreamDeck
-integration, arena screens, online table booking, portable player profiles with
-statistics and a "trophy cabinet," and a published API. Pricing is tiered by entry cap
-for competitions (free up to 16 entries, rising to unlimited) and a flat per-team,
-per-season fee for team leagues.
-
-For a single-developer product it is impressively complete, particularly the
-streaming/venue tooling (overlays, timers, arena screens) and the "smart" fixture
-scheduling that accounts for physical table constraints — both of which are
-non-trivial engineering and go beyond what this MVP attempts. Its main structural
-limitation, from a technical standpoint, is that it appears to be a fairly monolithic
-product built and maintained by one person; there's no indication of a plugin/extension
-model, and pricing is oriented around entry caps rather than feature tiers, which is a
-sensible SaaS lever but means smaller organizers pay the same for a subset of features.
-
-This MVP deliberately scopes down to the core administrative loop that Wix cannot
-provide at all — competition structure, round-robin scheduling, and frame-level
-scoring — rather than attempting to match RackEmApp's streaming and venue features on
-day one. Those are called out explicitly in the roadmap below.
+players; the app schedules fixtures per division (round robin or knockout); captains or
+admins record match results frame-by-frame; standings update automatically. Built to
+give a pool league the full-featured competition management that Wix has no built-in
+system for.
 
 ## What's implemented
 
@@ -83,16 +51,20 @@ day one. Those are called out explicitly in the roadmap below.
   fixtures and legs played inside team fixtures, plus a head-to-head breakdown per
   opponent and a full match history linking back to each fixture.
 - **Admin login**: creating a league or division requires signing in as admin (username
-  `Admin`, password `Admin12!@` by default - see **Admin login** below). Browsing
-  leagues, registering players/teams, generating fixtures and scoring matches all remain
-  open to anyone, since that's the day-to-day captain/player workflow.
+  `Admin`, password `Admin12!@` by default - see **Admin login** below).
+- **Player accounts**: viewing the site at all — leagues, divisions, fixtures, standings,
+  player profiles — requires being logged in, either as admin or as a self-registered
+  player (see **Player accounts** below). Registering players/teams into a division,
+  generating fixtures, and scoring matches remain open to anyone with the fixture/division
+  URL, since that's the day-to-day captain/scorer workflow and doesn't need its own login
+  yet - see the roadmap for tightening this further.
 
 ## What's deliberately out of scope for v1
 
 Handicaps, online entry/payment, tablet-specific UI, stream overlays and timers, table
-booking, double-elimination/mini-knockout/mixed formats, and per-user accounts (there's
-one shared admin account, not individual logins per league admin/captain/player). See
-**Roadmap** below.
+booking, double-elimination/mini-knockout/mixed formats, and role-aware accounts (a
+player account can view everything but has no captain/league-admin permissions of its
+own yet - see **Roadmap** below).
 
 ## Admin login
 
@@ -104,8 +76,8 @@ League and division creation are gated behind a single admin account:
 Override these via the `ADMIN_USERNAME` and `ADMIN_PASSWORD` environment variables
 before deploying anywhere real people can reach it - the defaults are checked into this
 repo and are not a secret. Also set `SESSION_SECRET` to a random string in production;
-it's the key used to sign login tokens (`server/src/auth.js`), and the checked-in
-default is only safe for local use.
+it's the key used to sign login tokens (`server/src/auth.js` and `server/src/userAuth.js`
+both use it), and the checked-in default is only safe for local use.
 
 This is a deliberately minimal auth model: one hardcoded account, a hand-rolled signed
 token (HMAC-SHA256 via Node's built-in `crypto`, no extra dependency) with a 24-hour
@@ -114,15 +86,36 @@ league creation, but it is **not** a substitute for real per-user accounts with 
 passwords - see the roadmap below for what a multi-admin, role-aware version would need
 (league admin vs. captain vs. player, each with their own login).
 
+## Player accounts
+
+Anyone can self-register a player account (top right of the site, next to Admin Login) -
+this is what's required to browse the site as a normal visitor. Registration collects:
+
+- First name, last name, email, password (required)
+- Phone (optional)
+- Venue and team name (required)
+- Classification, A through D (optional)
+
+Passwords are salted and hashed with Node's built-in `crypto.scrypt` (never stored in
+plaintext), and login issues the same style of HMAC-signed, 24-hour token as the admin
+account, stored in `localStorage` separately from the admin session so a browser can be
+logged into both an admin session and a player session at once - the header shows both
+controls side by side. Player accounts live in the same JSON database as everything else
+(`db.users`), not a separate store. See `server/src/userAuth.js` for the implementation,
+and the roadmap for what a production version needs on top of this (password reset,
+email verification, and real per-account permissions beyond "can view").
+
 ## Architecture
 
 ```
 pool-league/
   server/            Node.js + Express REST API
     src/
-      index.js         Routes, static hosting of the built client
-      db.js             JSON-file persistence layer (see note below)
-      auth.js           Admin login + HMAC-signed session tokens
+      index.js          Routes, static hosting of the built client
+      db.js              JSON-file persistence layer (see note below)
+      auth.js            Admin login + HMAC-signed session tokens
+      userAuth.js        Player account registration/login, password hashing,
+                          requireAnyAuth (admin OR player) route gate
       errors.js
       services/
         roundRobin.js    Circle-method scheduler (singles + teams)
@@ -133,10 +126,11 @@ pool-league/
         seed.js          Seeds "Top Spin Singles" with 6 divisions + demo data
   client/            React (Vite) single-page app
     src/
-      pages/           LeagueList, LeagueDetail, DivisionDetail, FixtureDetail,
-                        PlayerProfile, Login
-      AuthContext.jsx  Admin session state (token storage, login/logout)
-      api.js           Fetch wrapper for the REST API
+      pages/                LeagueList, LeagueDetail, DivisionDetail, FixtureDetail,
+                            PlayerProfile, Login, Register, PlayerLogin
+      AuthContext.jsx       Admin session state (token storage, login/logout)
+      PlayerAuthContext.jsx Player session state, kept separate from admin
+      api.js                Fetch wrapper for the REST API
 ```
 
 **Why a JSON file instead of a real database?** This v1 is optimized to be cloned and
@@ -168,6 +162,11 @@ script, not a rewrite. This is the top item in the roadmap.
   - `nextFixtureId`/`nextFixtureSlot` (`'home'|'away'`) link a knockout fixture to the
     one its winner advances into; both are `null` for round-robin fixtures and for a
     knockout final.
+- `User` (player account): `id, firstName, lastName, email, passwordHash, phone,
+  venue, teamName, classification ('A'|'B'|'C'|'D'|null), createdAt`. Distinct from
+  `Player` above — a `Player` is a name entered into a division/team roster (by anyone,
+  no account needed); a `User` is a login the site's standard views are gated behind.
+  Nothing currently links the two records together (see roadmap).
 
 ## Running it locally
 
@@ -188,6 +187,10 @@ npm run build      # produces client/dist, which the server serves automatically
 # Now open http://localhost:4000 — the whole app is served from one port.
 ```
 
+Browsing the site requires being logged in (see **Player accounts** above) - either
+register a player account from the "Login" link top right, or sign in as admin
+(`Admin` / `Admin12!@`) from "Admin Login" next to it.
+
 For frontend development with hot reload instead of a static build, run `npm run dev`
 in `client/` (http://localhost:5173) instead of `npm run build`; the Vite dev server
 proxies `/api` requests to the Express server on port 4000, so run both at once.
@@ -197,36 +200,40 @@ proxies `/api` requests to the Express server on port 4000, so run both at once.
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/auth/login` | Admin login, returns a signed token |
-| GET/POST | `/api/leagues` | List / create leagues (create requires admin) |
-| GET | `/api/leagues/:id` | League + its divisions |
+| POST | `/api/users/register` | Player account self-registration, returns a signed token |
+| POST | `/api/users/login` | Player login, returns a signed token |
+| GET | `/api/users/me` | The logged-in player's own account details (requires player login) |
+| GET/POST | `/api/leagues` | List (requires login, admin or player) / create leagues (requires admin) |
+| GET | `/api/leagues/:id` | League + its divisions (requires login) |
 | POST | `/api/leagues/:leagueId/divisions` | Add a division (requires admin; accepts `entryType`, `scheduling`, `legsPerMatch`) |
-| GET | `/api/divisions/:id` | Division + players/teams, fixtures, standings |
+| GET | `/api/divisions/:id` | Division + players/teams, fixtures, standings (requires login) |
 | POST/DELETE | `/api/divisions/:id/players` | Register / remove a player (singles, pre-fixtures only) |
 | POST/DELETE | `/api/divisions/:id/teams` | Add / remove a team (teams, pre-fixtures only) |
 | POST/DELETE | `/api/teams/:teamId/players` | Add / remove a player on a team roster |
 | POST | `/api/divisions/:id/generate-fixtures` | Generate the fixture list (round robin or knockout bracket, per the division's `scheduling`) |
-| GET | `/api/fixtures/:id` | Fixture detail (singles or team, includes `bothEntrantsKnown` for knockout TBD slots) |
+| GET | `/api/fixtures/:id` | Fixture detail (requires login; singles or team, includes `bothEntrantsKnown` for knockout TBD slots) |
 | POST | `/api/fixtures/:id/frames` | Record a frame winner (singles) |
 | DELETE | `/api/fixtures/:id/frames/last` | Undo the last recorded frame (blocked once the result has advanced a bracket) |
 | POST | `/api/fixtures/:id/legs/:legNumber/nominate` | Nominate the two players for a team-fixture leg |
 | POST | `/api/fixtures/:id/legs/:legNumber/frames` | Record a frame winner within a leg |
 | DELETE | `/api/fixtures/:id/legs/:legNumber/frames/last` | Undo the last frame within a leg |
-| GET | `/api/players/:id` | Player profile: career record, head-to-head, match history |
+| GET | `/api/players/:id` | Player profile: career record, head-to-head, match history (requires login) |
 
-## Roadmap toward RackEmApp feature parity
+## Roadmap
 
-1. Swap the JSON file store for Postgres and replace the single hardcoded admin
-   account with real per-user accounts and roles (league admin vs. player vs.
-   captain), since a real league needs more than one trusted operator.
+1. Swap the JSON file store for Postgres, and move player/admin accounts toward
+   proper role-aware permissions (league admin vs. captain vs. player), including
+   linking a `User` account to the `Player` roster entries it corresponds to,
+   password reset, and email verification.
 2. Further scheduling methods: home/away double round robin, double elimination,
    mini-knockouts, and the ability to mix formats within one competition.
 3. Seeded/ranked knockout brackets (current v1 seeds in registration order, not by
    past performance) and best-of-N handicaps.
 4. Deeper player statistics: form guides, break-and-continue / century-style stats if
    relevant to 8-ball, a "trophy cabinet" across seasons.
-5. Live-scoring niceties RackEmApp already has: tablet-optimized scoring UI, stream
-   overlay endpoint, shot/match timers — valuable but explicitly deferred until the
-   core league engine above is solid.
+5. Live-scoring niceties: tablet-optimized scoring UI, stream overlay endpoint,
+   shot/match timers — valuable but explicitly deferred until the core league engine
+   above is solid.
 
 ## Seeded demo data
 

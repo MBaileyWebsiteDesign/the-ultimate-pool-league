@@ -1,9 +1,12 @@
 import { getStoredToken } from './AuthContext.jsx';
+import { getStoredPlayerToken } from './PlayerAuthContext.jsx';
 
 const BASE = '/api';
 
 async function request(path, options = {}) {
-  const token = getStoredToken();
+  // Prefer the admin token when both exist - an admin session can do
+  // everything a player session can (browsing), plus admin-only actions.
+  const token = getStoredToken() || getStoredPlayerToken();
   const res = await fetch(`${BASE}${path}`, {
     headers: {
       'Content-Type': 'application/json',
@@ -21,6 +24,13 @@ async function request(path, options = {}) {
 export const api = {
   login: (username, password) =>
     request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+
+  // Player/member accounts
+  registerPlayer: (data) =>
+    request('/users/register', { method: 'POST', body: JSON.stringify(data) }),
+  loginPlayer: (email, password) =>
+    request('/users/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  getMe: () => request('/users/me'),
 
   getLeagues: () => request('/leagues'),
   createLeague: (data) => request('/leagues', { method: 'POST', body: JSON.stringify(data) }),
