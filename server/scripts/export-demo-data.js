@@ -24,18 +24,23 @@ const db = JSON.parse(readFileSync(SOURCE, 'utf-8'));
 // for a known demo account (there's nothing real to check it against once
 // this ships to a public static site).
 //
-// Also personalize the seeded admin account: link it to the real "Matt
-// Bailey" player (Division 5) so "My Account" / "My Fixtures" has something
-// real to show instead of an empty list, and flag it as captain too so both
-// the Admin and Captain portals are reachable from the one demo account.
+// Also personalize the seeded ADMIN account specifically: link it to the
+// real "Matt Bailey" player (Division 5) so "My Account" / "My Fixtures" has
+// something real to show instead of an empty list, and flag it as captain
+// too so both the Admin and Captain portals are reachable from the one demo
+// account. NB: this used to remap every seeded user's playerId this way,
+// which only "worked" because the admin was the only seeded user at the
+// time - now that seed.js also creates one User per roster player (each
+// already linked to their own Player), only the admin account should be
+// touched here; everyone else's own playerId link must survive untouched.
+const ADMIN_EMAIL = 'admin@example.com';
 const mattBailey = db.players.find((p) => p.name === 'Matt Bailey');
 db.users = db.users.map((user) => {
   const { passwordHash, ...rest } = user;
-  return {
-    ...rest,
-    isCaptain: true,
-    playerId: mattBailey ? mattBailey.id : rest.playerId,
-  };
+  if (user.email === ADMIN_EMAIL) {
+    return { ...rest, isCaptain: true, playerId: mattBailey ? mattBailey.id : rest.playerId };
+  }
+  return rest;
 });
 
 writeFileSync(DEST, JSON.stringify(db));

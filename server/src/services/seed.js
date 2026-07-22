@@ -71,12 +71,58 @@ const league = {
 };
 db.leagues.push(league);
 
+// Every seeded player below also gets a registered `User` account (see
+// createSeededPlayerUser below) - a real login, not just a name in a
+// division roster - so the "pick a registered player" flow used everywhere
+// (division rosters, team rosters, pairings) has a full pool to choose from
+// on a fresh install without an admin having to register 84 accounts by
+// hand first. They all share one publicly-documented password (see
+// SEEDED_PLAYER_PASSWORD below and the README's "Seeded demo data" section)
+// - change or reset these before deploying anywhere real people can reach
+// it, same caveat as the seeded admin account above.
+const SEEDED_PLAYER_PASSWORD = 'Player123!';
+const seededPlayerPasswordHash = hashPassword(SEEDED_PLAYER_PASSWORD);
+let seededPlayerEmailIndex = 0;
+const usedSeededSlugs = new Map(); // slug -> count seen so far, for the (currently theoretical) case of two same-named players
+
+// Deterministic, collision-safe email/name split for a seeded player's
+// companion account. Splits on the first space only (so "Suraj Singh
+// Rathor" -> firstName "Suraj", lastName "Singh Rathor") - good enough for
+// seed/demo data, not meant to be a general name parser. `venue` cycles
+// through the seeded venues round-robin purely for realistic variety across
+// profiles, since the roster arrays below don't carry a real per-player
+// venue.
+function createSeededPlayerUser(player) {
+  const spaceIndex = player.name.indexOf(' ');
+  const firstName = spaceIndex === -1 ? player.name : player.name.slice(0, spaceIndex);
+  const lastName = spaceIndex === -1 ? '' : player.name.slice(spaceIndex + 1);
+  const baseSlug = player.name.toLowerCase().replace(/[^a-z0-9]+/g, '.').replace(/^\.+|\.+$/g, '');
+  const seenCount = usedSeededSlugs.get(baseSlug) || 0;
+  usedSeededSlugs.set(baseSlug, seenCount + 1);
+  const slug = seenCount === 0 ? baseSlug : `${baseSlug}${seenCount + 1}`;
+  const venue = seedVenueNames[seededPlayerEmailIndex % seedVenueNames.length];
+  const email = `${slug}@example.com`;
+  seededPlayerEmailIndex += 1;
+  return {
+    id: uuid(),
+    firstName,
+    lastName,
+    email,
+    passwordHash: seededPlayerPasswordHash,
+    phone: '',
+    venue,
+    teamName: 'Unassigned',
+    classification: null,
+    isAdmin: false,
+    isCaptain: false,
+    status: 'active',
+    playerId: player.id,
+    createdAt: now,
+  };
+}
+
 // Real current-season rosters, one array per division - pulled from the
 // current standings tables (Prem/Div1-5) rather than invented demo names.
-// These are seed/demo `Player` records only, not linked to a registered
-// `User` account (same exception the old demo data relied on - see the
-// README's "Seeded demo data" section) purely so the divisions have full
-// rosters to test against out of the box.
 const rosters = {
   'Premier League': [
     'Suraj Singh Rathor', 'Neil Cummins', 'Simon Hendry', 'Josh Barnes',
@@ -139,6 +185,7 @@ divisions.forEach((division) => {
   const names = rosters[division.name] || [];
   const players = names.map((name) => ({ id: uuid(), name }));
   db.players.push(...players);
+  db.users.push(...players.map(createSeededPlayerUser));
   division.playerIds = players.map((p) => p.id);
   division.fixturesGenerated = true;
 
@@ -176,3 +223,7 @@ divisions.forEach((d) => {
 });
 console.log(`Seeded ${seedVenueNames.length} approved venues: ${seedVenueNames.join(', ')}`);
 console.log(`Seeded admin account: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD} (change this before deploying anywhere real people can reach it)`);
+console.log(
+  `Seeded ${db.users.length - 1} player accounts (one per roster name above), password "${SEEDED_PLAYER_PASSWORD}" for all of them - ` +
+    `email is <firstname.lastname>@example.com (e.g. suraj.singh.rathor@example.com). Change/reset these before deploying anywhere real people can reach it.`
+);

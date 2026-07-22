@@ -90,6 +90,10 @@ const networkApi = {
     }),
 
   getFixture: (id) => request(`/fixtures/${id}`),
+  // Public, unauthenticated summary for the OBS stream overlay page - no
+  // Authorization header required (and none sent, even if one happens to be
+  // in localStorage), since OBS Browser Source loads this URL cold.
+  getOverlayFixture: (id) => request(`/overlay/fixtures/${id}`),
   recordFrame: (fixtureId, winnerPlayerId) =>
     request(`/fixtures/${fixtureId}/frames`, { method: 'POST', body: JSON.stringify({ winnerPlayerId }) }),
   undoLastFrame: (fixtureId) => request(`/fixtures/${fixtureId}/frames/last`, { method: 'DELETE' }),

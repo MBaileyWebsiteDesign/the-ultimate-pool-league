@@ -14,6 +14,7 @@ import AdminUserEdit from './pages/AdminUserEdit.jsx';
 import AdminAuditLog from './pages/AdminAuditLog.jsx';
 import AdminVenues from './pages/AdminVenues.jsx';
 import AdminSeasonWizard from './pages/AdminSeasonWizard.jsx';
+import StreamOverlay from './pages/StreamOverlay.jsx';
 import { AuthProvider, useAuth } from './AuthContext.jsx';
 import { BreadcrumbProvider } from './BreadcrumbContext.jsx';
 import Breadcrumbs from './components/Breadcrumbs.jsx';
@@ -131,10 +132,22 @@ function AppShell() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <BreadcrumbProvider>
-        <AppShell />
-      </BreadcrumbProvider>
-    </AuthProvider>
+    <Routes>
+      {/* Standalone, unauthenticated route for the OBS stream overlay - no
+          header/breadcrumbs/login gate, since this is meant to be loaded
+          cold inside OBS's Browser Source, not browsed by a logged-in
+          person. Deliberately outside AuthProvider/AppShell entirely. */}
+      <Route path="/overlay/:fixtureId" element={<StreamOverlay />} />
+      <Route
+        path="/*"
+        element={
+          <AuthProvider>
+            <BreadcrumbProvider>
+              <AppShell />
+            </BreadcrumbProvider>
+          </AuthProvider>
+        }
+      />
+    </Routes>
   );
 }
