@@ -4,9 +4,9 @@ import { api } from '../api.js';
 import { useSetBreadcrumbs } from '../BreadcrumbContext.jsx';
 import { useIsAdminSession } from '../useAdminSession.js';
 
-function AdminOverridePanel({ fixture, isTeams, onChange }) {
-  const homeName = isTeams ? fixture.homeTeam?.name : fixture.homePlayer?.name;
-  const awayName = isTeams ? fixture.awayTeam?.name : fixture.awayPlayer?.name;
+function AdminOverridePanel({ fixture, isTeams, isDoubles, onChange }) {
+  const homeName = isTeams ? fixture.homeTeam?.name : isDoubles ? fixture.homePairing?.name : fixture.homePlayer?.name;
+  const awayName = isTeams ? fixture.awayTeam?.name : isDoubles ? fixture.awayPairing?.name : fixture.awayPlayer?.name;
   const [homeScore, setHomeScore] = useState(String(isTeams ? fixture.homeLegsWon ?? 0 : fixture.homeFrameScore ?? 0));
   const [awayScore, setAwayScore] = useState(String(isTeams ? fixture.awayLegsWon ?? 0 : fixture.awayFrameScore ?? 0));
   const [error, setError] = useState('');
@@ -219,18 +219,40 @@ function TeamFixtureView({ fixture, onChange, setError }) {
   );
 }
 
-function SinglesFixtureView({ fixture, onChange, setError }) {
+// Handles both singles fixtures (fixture.homePlayer/awayPlayer, a single
+// registered player) and doubles/triples fixtures (fixture.homePairing/
+// awayPairing, a named 2-3 player group) - the two are structurally
+// identical (one continuous frame race, no legs), differing only in what
+// the "entrant" is and whether it links to a player profile page.
+function SinglesFixtureView({ fixture, isDoubles, onChange, setError }) {
   const complete = fixture.status === 'completed';
+  const homeEntrant = isDoubles ? fixture.homePairing : fixture.homePlayer;
+  const awayEntrant = isDoubles ? fixture.awayPairing : fixture.awayPlayer;
+
+  const EntrantName = ({ entrant, id }) => {
+    if (!entrant) return 'TBD';
+    if (isDoubles) {
+      return (
+        <>
+          {entrant.name}
+          <div className="muted" style={{ fontSize: '0.75rem', fontWeight: 400, marginTop: 2 }}>
+            {entrant.players.map((p) => p.name).join(' & ')}
+          </div>
+        </>
+      );
+    }
+    return <Link to={`/players/${id}`}>{entrant.name}</Link>;
+  };
 
   if (!fixture.bothEntrantsKnown) {
     return (
       <section className="card scoreboard">
         <div className="scoreboard-player">
-          <h2>{fixture.homePlayer ? <Link to={`/players/${fixture.homePlayerId}`}>{fixture.homePlayer.name}</Link> : 'TBD'}</h2>
+          <h2><EntrantName entrant={homeEntrant} id={fixture.homePlayerId} /></h2>
         </div>
         <div className="scoreboard-vs">vs</div>
         <div className="scoreboard-player">
-          <h2>{fixture.awayPlayer ? <Link to={`/players/${fixture.awayPlayerId}`}>{fixture.awayPlayer.name}</Link> : 'TBD'}</h2>
+          <h2><EntrantName entrant={awayEntrant} id={fixture.awayPlayerId} /></h2>
         </div>
         <p className="muted" style={{ width: '100%', textAlign: 'center' }}>
           Waiting on the result of an earlier round before this match can be played.
@@ -239,10 +261,10 @@ function SinglesFixtureView({ fixture, onChange, setError }) {
     );
   }
 
-  const onRecord = async (winnerPlayerId) => {
+  const onRecord = async (winnerId) => {
     setError('');
     try {
-      await api.recordFrame(fixture.id, winnerPlayerId);
+      await api.recordFrame(fixture.id, winnerId);
       onChange();
     } catch (err) {
       setError(err.message);
@@ -263,25 +285,25 @@ function SinglesFixtureView({ fixture, onChange, setError }) {
     <div>
       <section className="card scoreboard">
         <div className="scoreboard-player">
-          <h2><Link to={`/players/${fixture.homePlayerId}`}>{fixture.homePlayer.name}</Link></h2>
+          <h2><EntrantName entrant={homeEntrant} id={fixture.homePlayerId} /></h2>
           <div className="score">{fixture.homeFrameScore}</div>
           <button className="btn btn-primary" disabled={complete} onClick={() => onRecord(fixture.homePlayerId)}>
-            Frame won by {fixture.homePlayer.name}
+            Frame won by {homeEntrant.name}
           </button>
         </div>
         <div className="scoreboard-vs">vs</div>
         <div className="scoreboard-player">
-          <h2><Link to={`/players/${fixture.awayPlayerId}`}>{fixture.awayPlayer.name}</Link></h2>
+          <h2><EntrantName entrant={awayEntrant} id={fixture.awayPlayerId} /></h2>
           <div className="score">{fixture.awayFrameScore}</div>
           <button className="btn btn-primary" disabled={complete} onClick={() => onRecord(fixture.awayPlayerId)}>
-            Frame won by {fixture.awayPlayer.name}
+            Frame won by {awayEntrant.name}
           </button>
         </div>
       </section>
 
       {complete && (
         <p className="banner banner-success">
-          Match complete: {fixture.homePlayer.name} {fixture.homeFrameScore} - {fixture.awayFrameScore} {fixture.awayPlayer.name}
+          Match complete: {homeEntrant.name} {fixture.homeFrameScore} - {fixture.awayFrameScore} {awayEntrant.name}
         </p>
       )}
 
@@ -295,7 +317,7 @@ function SinglesFixtureView({ fixture, onChange, setError }) {
         <ol className="frame-history">
           {fixture.frames.map((f) => (
             <li key={f.frameNumber}>
-              Frame {f.frameNumber}: {f.winnerPlayerId === fixture.homePlayerId ? fixture.homePlayer.name : fixture.awayPlayer.name}
+              Frame {f.frameNumber}: {f.winnerPlayerId === fixture.homePlayerId ? homeEntrant.name : awayEntrant.name}
             </li>
           ))}
           {fixture.frames.length === 0 && <li className="muted">No frames recorded yet.</li>}
@@ -343,6 +365,12 @@ export default function FixtureDetail() {
   // knockout slots even on team fixtures. `legs` is always present on team
   // fixture responses (even before both sides are known), never on singles.
   const isTeams = Array.isArray(fixture.legs);
+  // Doubles/triples fixtures reuse the singles shape (no `legs`), but the
+  // API keys them `homePairing`/`awayPairing` instead of `homePlayer`/
+  // `awayPlayer` since the entrant is a named 2-3 player group, not one
+  // registered player - that key is always present (even `null`) on a
+  // doubles/triples division's fixtures, never on a singles one.
+  const isDoubles = !isTeams && 'homePairing' in fixture;
 
   return (
     <div>
@@ -353,10 +381,10 @@ export default function FixtureDetail() {
       {isTeams ? (
         <TeamFixtureView fixture={fixture} onChange={load} setError={setError} />
       ) : (
-        <SinglesFixtureView fixture={fixture} onChange={load} setError={setError} />
+        <SinglesFixtureView fixture={fixture} isDoubles={isDoubles} onChange={load} setError={setError} />
       )}
 
-      {isAdminSession && <AdminOverridePanel fixture={fixture} isTeams={isTeams} onChange={load} />}
+      {isAdminSession && <AdminOverridePanel fixture={fixture} isTeams={isTeams} isDoubles={isDoubles} onChange={load} />}
     </div>
   );
 }

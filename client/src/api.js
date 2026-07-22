@@ -104,6 +104,16 @@ const networkApi = {
   removeTeamPlayer: (teamId, playerId) =>
     request(`/teams/${teamId}/players/${playerId}`, { method: 'DELETE' }),
 
+  // Pairings (doubles/triples divisions only)
+  createPairing: (divisionId, name) =>
+    request(`/divisions/${divisionId}/pairings`, { method: 'POST', body: JSON.stringify({ name }) }),
+  removePairing: (divisionId, pairingId) =>
+    request(`/divisions/${divisionId}/pairings/${pairingId}`, { method: 'DELETE' }),
+  addPairingPlayer: (pairingId, playerId) =>
+    request(`/pairings/${pairingId}/players`, { method: 'POST', body: JSON.stringify({ playerId }) }),
+  removePairingPlayer: (pairingId, playerId) =>
+    request(`/pairings/${pairingId}/players/${playerId}`, { method: 'DELETE' }),
+
   // Leg scoring (team fixtures only)
   nominateLeg: (fixtureId, legNumber, homePlayerId, awayPlayerId) =>
     request(`/fixtures/${fixtureId}/legs/${legNumber}/nominate`, {

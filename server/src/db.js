@@ -20,6 +20,7 @@ const EMPTY_STATE = {
   divisions: [],
   players: [],
   teams: [],
+  pairings: [],
   divisionPlayers: [],
   fixtures: [],
   users: [],
@@ -41,6 +42,7 @@ export function readDb() {
   // Backfill for databases created before `teams`/`users`/`auditLog`/`venues`
   // existed, and before users had role/status/playerId fields.
   if (!state.teams) state.teams = [];
+  if (!state.pairings) state.pairings = [];
   if (!state.users) state.users = [];
   if (!state.auditLog) state.auditLog = [];
   if (!state.venues) state.venues = [];

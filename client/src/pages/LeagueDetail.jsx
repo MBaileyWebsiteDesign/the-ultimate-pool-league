@@ -12,6 +12,7 @@ export default function LeagueDetail() {
   const [name, setName] = useState('');
   const [entryType, setEntryType] = useState('singles');
   const [legsPerMatch, setLegsPerMatch] = useState(5);
+  const [pairingSize, setPairingSize] = useState(2);
   const [scheduling, setScheduling] = useState('round_robin_single');
   const [showForm, setShowForm] = useState(false);
 
@@ -38,10 +39,12 @@ export default function LeagueDetail() {
         entryType,
         scheduling,
         ...(entryType === 'teams' ? { legsPerMatch: Number(legsPerMatch) } : {}),
+        ...(entryType === 'doubles' ? { pairingSize: Number(pairingSize) } : {}),
       });
       setName('');
       setEntryType('singles');
       setLegsPerMatch(5);
+      setPairingSize(2);
       setScheduling('round_robin_single');
       setShowForm(false);
       load();
@@ -80,6 +83,7 @@ export default function LeagueDetail() {
             <select value={entryType} onChange={(e) => setEntryType(e.target.value)}>
               <option value="singles">Singles (one player vs one player)</option>
               <option value="teams">Teams (team vs team, made up of legs)</option>
+              <option value="doubles">Doubles/Triples (2-3 player pairing vs pairing, alternate-shot)</option>
             </select>
           </label>
           {entryType === 'teams' && (
@@ -92,6 +96,15 @@ export default function LeagueDetail() {
                 onChange={(e) => setLegsPerMatch(e.target.value)}
                 required
               />
+            </label>
+          )}
+          {entryType === 'doubles' && (
+            <label>
+              Players per pairing
+              <select value={pairingSize} onChange={(e) => setPairingSize(e.target.value)}>
+                <option value={2}>2 (doubles)</option>
+                <option value={3}>3 (triples)</option>
+              </select>
             </label>
           )}
           <label>
@@ -117,7 +130,9 @@ export default function LeagueDetail() {
             <p className="muted">
               {division.entryType === 'teams'
                 ? `${division.teamIds.length} team${division.teamIds.length === 1 ? '' : 's'} · ${division.legsPerMatch} legs/match`
-                : `${division.playerIds.length} player${division.playerIds.length === 1 ? '' : 's'}`}
+                : division.entryType === 'doubles'
+                  ? `${division.pairingIds.length} pairing${division.pairingIds.length === 1 ? '' : 's'} · ${division.pairingSize} players/pairing`
+                  : `${division.playerIds.length} player${division.playerIds.length === 1 ? '' : 's'}`}
               {' · '}
               {division.scheduling === 'knockout_single_elim'
                 ? 'Knockout (single elim)'

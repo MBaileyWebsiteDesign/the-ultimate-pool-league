@@ -333,6 +333,146 @@ function TeamRoster({ division, registeredPlayers, onChange, setError }) {
   );
 }
 
+// Pairings (doubles/triples divisions): a named group of 2-3 registered
+// players who play together, alternate-shot, as one side. Structurally the
+// same UI shape as TeamRoster above, but capped at `division.pairingSize`
+// players per pairing (2 for doubles, 3 for triples) instead of unlimited,
+// and fixtures are scored like singles (no legs), so there's no per-leg
+// nomination step - a pairing just needs to be full before fixtures can be
+// generated.
+function PairingRoster({ division, registeredPlayers, onChange, setError }) {
+  const [pairingName, setPairingName] = useState('');
+  const [playerIds, setPlayerIds] = useState({}); // pairingId -> selected registered playerId
+  const assignedElsewhere = new Set(division.pairings.flatMap((p) => p.players.map((pl) => pl.id)));
+
+  const onAddPairing = async (e) => {
+    e.preventDefault();
+    setError('');
+    try {
+      await api.createPairing(division.id, pairingName);
+      setPairingName('');
+      onChange();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const onRemovePairing = async (pairingId) => {
+    setError('');
+    try {
+      await api.removePairing(division.id, pairingId);
+      onChange();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const onAddPairingPlayer = async (e, pairingId) => {
+    e.preventDefault();
+    const selected = playerIds[pairingId];
+    if (!selected) return;
+    setError('');
+    try {
+      await api.addPairingPlayer(pairingId, selected);
+      setPlayerIds((prev) => ({ ...prev, [pairingId]: '' }));
+      onChange();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const onRemovePairingPlayer = async (pairingId, playerId) => {
+    setError('');
+    try {
+      await api.removePairingPlayer(pairingId, playerId);
+      onChange();
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const canGenerate = division.pairings.length >= 2 && division.pairings.every((p) => p.players.length === division.pairingSize);
+  const noun = division.pairingSize === 3 ? 'Triples' : 'Doubles';
+
+  return (
+    <section className="card">
+      <h2>Pairings</h2>
+      <p className="muted" style={{ marginTop: -8, marginBottom: 12, fontSize: '0.8rem' }}>
+        {noun} - each pairing needs exactly {division.pairingSize} registered players before fixtures can be generated.
+      </p>
+      {!division.fixturesGenerated && (
+        <form className="inline-form" onSubmit={onAddPairing}>
+          <input
+            value={pairingName}
+            onChange={(e) => setPairingName(e.target.value)}
+            placeholder="Pairing name"
+            required
+          />
+          <button className="btn btn-primary" type="submit">Add Pairing</button>
+        </form>
+      )}
+
+      <div className="card-grid">
+        {division.pairings.map((pairing) => (
+          <div key={pairing.id} className="card">
+            <div className="page-header">
+              <h3 style={{ margin: 0 }}>{pairing.name}</h3>
+              {!division.fixturesGenerated && (
+                <button className="btn-link" onClick={() => onRemovePairing(pairing.id)}>remove pairing</button>
+              )}
+            </div>
+            <ul className="player-list">
+              {pairing.players.map((p) => (
+                <li key={p.id}>
+                  <Link to={`/players/${p.id}`}>{p.name}</Link>
+                  {!division.fixturesGenerated && (
+                    <button className="btn-link" onClick={() => onRemovePairingPlayer(pairing.id, p.id)}>remove</button>
+                  )}
+                </li>
+              ))}
+              {pairing.players.length === 0 && <li className="muted">No players yet</li>}
+            </ul>
+            {!division.fixturesGenerated && pairing.players.length < division.pairingSize && (() => {
+              const pairingAvailable = registeredPlayers.filter((p) => !assignedElsewhere.has(p.id));
+              return (
+                <form className="inline-form" onSubmit={(e) => onAddPairingPlayer(e, pairing.id)}>
+                  <select
+                    value={playerIds[pairing.id] || ''}
+                    onChange={(e) => setPlayerIds((prev) => ({ ...prev, [pairing.id]: e.target.value }))}
+                    required
+                  >
+                    <option value="" disabled>
+                      {pairingAvailable.length === 0 ? 'No registered players available' : 'Select a registered player…'}
+                    </option>
+                    {pairingAvailable.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                  <button className="btn btn-primary" type="submit" disabled={!playerIds[pairing.id]}>Add</button>
+                </form>
+              );
+            })()}
+          </div>
+        ))}
+        {division.pairings.length === 0 && <p className="muted">No pairings registered yet</p>}
+      </div>
+
+      {!division.fixturesGenerated ? (
+        <button
+          className="btn btn-primary"
+          disabled={!canGenerate}
+          onClick={() => api.generateFixtures(division.id).then(onChange).catch((e) => setError(e.message))}
+          title={!canGenerate ? `Add at least 2 pairings, each with exactly ${division.pairingSize} players` : ''}
+        >
+          {generateFixturesLabel(division)}
+        </button>
+      ) : (
+        <p className="muted">Fixtures generated — pairings are locked.</p>
+      )}
+    </section>
+  );
+}
+
 export default function DivisionDetail() {
   const { divisionId } = useParams();
   const { isAdmin } = useAuth();
@@ -361,8 +501,9 @@ export default function DivisionDetail() {
   if (!division) return <p>Loading…</p>;
 
   const isTeams = division.entryType === 'teams';
+  const isDoubles = division.entryType === 'doubles';
   const nameOf = (id) =>
-    (isTeams ? division.teams : division.players).find((x) => x.id === id)?.name || '—';
+    (isTeams ? division.teams : isDoubles ? division.pairings : division.players).find((x) => x.id === id)?.name || '—';
 
   // Double-elimination divisions carry a `bracketRole` on every fixture
   // ('winners' | 'losers' | 'grand_final' | 'grand_final_reset') - group by
@@ -405,17 +546,23 @@ export default function DivisionDetail() {
       <p><Link to={`/leagues/${division.leagueId}`}>&larr; Back to league</Link></p>
       <h1>{division.name}</h1>
       <p className="muted">
-        {isTeams ? `Team league · ${division.legsPerMatch} legs per match` : 'Singles league'}
+        {isTeams
+          ? `Team league · ${division.legsPerMatch} legs per match`
+          : isDoubles
+            ? `${division.pairingSize === 3 ? 'Triples' : 'Doubles'} league · ${division.pairingSize} players per pairing`
+            : 'Singles league'}
       </p>
       {error && <p className="error">{error}</p>}
 
       {isTeams ? (
         <TeamRoster division={division} registeredPlayers={registeredPlayers} onChange={load} setError={setError} />
+      ) : isDoubles ? (
+        <PairingRoster division={division} registeredPlayers={registeredPlayers} onChange={load} setError={setError} />
       ) : (
         <SinglesRoster division={division} registeredPlayers={registeredPlayers} onChange={load} setError={setError} />
       )}
 
-      {isAdmin && !isTeams && division.fixturesGenerated && (
+      {isAdmin && !isTeams && !isDoubles && division.fixturesGenerated && (
         <PlayerSubstitutionPanel division={division} registeredPlayers={registeredPlayers} onChange={load} setError={setError} />
       )}
 
@@ -450,14 +597,14 @@ export default function DivisionDetail() {
             <>
               <thead>
                 <tr>
-                  <th>#</th><th>Player</th><th>P</th><th>W</th><th>L</th><th>F</th><th>A</th><th>+/-</th><th>Pts</th>
+                  <th>#</th><th>{isDoubles ? 'Pairing' : 'Player'}</th><th>P</th><th>W</th><th>L</th><th>F</th><th>A</th><th>+/-</th><th>Pts</th>
                 </tr>
               </thead>
               <tbody>
                 {division.standings.map((row, i) => (
                   <tr key={row.playerId}>
                     <td>{i + 1}</td>
-                    <td><Link to={`/players/${row.playerId}`}>{row.playerName}</Link></td>
+                    <td>{isDoubles ? row.playerName : <Link to={`/players/${row.playerId}`}>{row.playerName}</Link>}</td>
                     <td>{row.played}</td>
                     <td>{row.won}</td>
                     <td>{row.lost}</td>
