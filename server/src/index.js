@@ -252,10 +252,12 @@ app.get('/api/users/me/fixtures', requireAuth, asyncRoute((req, res) => {
   const playerId = user.playerId;
 
   const myTeamIds = db.teams.filter((t) => t.playerIds.includes(playerId)).map((t) => t.id);
+  const myPairingIds = db.pairings.filter((p) => p.playerIds.includes(playerId)).map((p) => p.id);
 
   const fixtures = db.fixtures.filter((f) => {
     if (f.homePlayerId === playerId || f.awayPlayerId === playerId) return true;
     if (myTeamIds.includes(f.homeTeamId) || myTeamIds.includes(f.awayTeamId)) return true;
+    if (myPairingIds.includes(f.homePlayerId) || myPairingIds.includes(f.awayPlayerId)) return true;
     return false;
   });
 
@@ -263,12 +265,17 @@ app.get('/api/users/me/fixtures', requireAuth, asyncRoute((req, res) => {
     const division = db.divisions.find((d) => d.id === f.divisionId);
     const league = db.leagues.find((l) => l.id === f.leagueId);
     const isTeams = !!f.legs;
+    const isDoubles = division?.entryType === 'doubles';
     const opponentId = isTeams
       ? (myTeamIds.includes(f.homeTeamId) ? f.awayTeamId : f.homeTeamId)
-      : (f.homePlayerId === playerId ? f.awayPlayerId : f.homePlayerId);
+      : isDoubles
+        ? (myPairingIds.includes(f.homePlayerId) ? f.awayPlayerId : f.homePlayerId)
+        : (f.homePlayerId === playerId ? f.awayPlayerId : f.homePlayerId);
     const opponentName = isTeams
       ? db.teams.find((t) => t.id === opponentId)?.name
-      : db.players.find((p) => p.id === opponentId)?.name;
+      : isDoubles
+        ? db.pairings.find((p) => p.id === opponentId)?.name
+        : db.players.find((p) => p.id === opponentId)?.name;
     return {
       id: f.id,
       leagueName: league?.name,
@@ -322,8 +329,14 @@ app.get('/api/leagues/:id', requireAuth, asyncRoute((req, res) => {
 
 // ---------- Divisions ----------
 // A division has two independent axes:
-// - entryType: "singles" (players register directly) or "teams" (teams
-//   register, each fixture is `legsPerMatch` nominated player-vs-player legs)
+// - entryType: "singles" (players register directly), "teams" (teams
+//   register, each fixture is `legsPerMatch` nominated player-vs-player legs),
+//   or "doubles" (2-3 named registered players register together as one
+//   `Pairing` and play alternate-shot as a single side - structurally a
+//   Pairing is just a named group of players like a Team, but a doubles/
+//   triples fixture is scored exactly like a singles fixture: one continuous
+//   frame race, no legs, `homePlayerId`/`awayPlayerId` just hold a Pairing id
+//   instead of a Player id - see the "Pairings" section below)
 // - scheduling: "round_robin_single" (default - everyone plays everyone once),
 //   "knockout_single_elim" (single-elimination bracket, byes if the entrant
 //   count isn't a power of 2), or "knockout_double_elim" (winners bracket +
@@ -335,21 +348,24 @@ app.get('/api/leagues/:id', requireAuth, asyncRoute((req, res) => {
 //   knockout.
 
 app.post('/api/leagues/:leagueId/divisions', requireAdmin, asyncRoute((req, res) => {
-  const { name, order = 0, entryType = 'singles', legsPerMatch = 5 } = req.body;
+  const { name, order = 0, entryType = 'singles', legsPerMatch = 5, pairingSize = 2 } = req.body;
   const db = readDb();
   const league = db.leagues.find((l) => l.id === req.params.leagueId);
   if (!league) throw new ApiError(404, 'League not found');
   const scheduling = req.body.scheduling || league.format.scheduling || 'round_robin_single';
 
   if (!name || !name.trim()) throw new ApiError(400, 'Division name is required');
-  if (!['singles', 'teams'].includes(entryType)) {
-    throw new ApiError(400, 'entryType must be "singles" or "teams"');
+  if (!['singles', 'teams', 'doubles'].includes(entryType)) {
+    throw new ApiError(400, 'entryType must be "singles", "teams" or "doubles"');
   }
   if (!SCHEDULING_TYPES.includes(scheduling)) {
     throw new ApiError(400, `scheduling must be one of: ${SCHEDULING_TYPES.join(', ')}`);
   }
   if (entryType === 'teams' && (!Number.isInteger(Number(legsPerMatch)) || Number(legsPerMatch) < 1)) {
     throw new ApiError(400, 'legsPerMatch must be a positive whole number');
+  }
+  if (entryType === 'doubles' && ![2, 3].includes(Number(pairingSize))) {
+    throw new ApiError(400, 'pairingSize must be 2 (doubles) or 3 (triples)');
   }
 
   const division = {
@@ -360,8 +376,10 @@ app.post('/api/leagues/:leagueId/divisions', requireAdmin, asyncRoute((req, res)
     entryType,
     scheduling,
     playerIds: [],
-    teamIds: entryType === 'teams' ? [] : [],
+    teamIds: [],
+    pairingIds: [],
     legsPerMatch: entryType === 'teams' ? Number(legsPerMatch) : null,
+    pairingSize: entryType === 'doubles' ? Number(pairingSize) : null,
     gapDays: null,
     fixturesGenerated: false,
   };
@@ -381,6 +399,18 @@ function hydrateDivision(db, division) {
       .map((t) => ({ ...t, players: db.players.filter((p) => t.playerIds.includes(p.id)) }));
     const standings = computeTeamStandings(division, db.fixtures, db.teams);
     return { ...division, leagueName, teams, fixtures, standings };
+  }
+
+  if (division.entryType === 'doubles') {
+    const pairings = db.pairings
+      .filter((p) => division.pairingIds.includes(p.id))
+      .map((p) => ({ ...p, players: db.players.filter((pl) => p.playerIds.includes(pl.id)) }));
+    // computeStandings just needs an entrant-id list (division.playerIds) and
+    // a matching list of { id, name } entrants to label rows with - a Pairing
+    // already has both fields, so this reuses the singles standings
+    // calculation unmodified rather than needing its own version.
+    const standings = computeStandings({ ...division, playerIds: division.pairingIds }, db.fixtures, pairings);
+    return { ...division, leagueName, pairings, fixtures, standings };
   }
 
   const players = db.players.filter((p) => division.playerIds.includes(p.id));
@@ -427,7 +457,9 @@ app.post('/api/divisions/:id/players', asyncRoute((req, res) => {
   const db = readDb();
   const division = db.divisions.find((d) => d.id === req.params.id);
   if (!division) throw new ApiError(404, 'Division not found');
-  if (division.entryType !== 'singles') throw new ApiError(400, 'This is a team division - add players to a team instead');
+  if (division.entryType !== 'singles') {
+    throw new ApiError(400, `This is a ${division.entryType} division - add players to a ${division.entryType === 'teams' ? 'team' : 'pairing'} instead`);
+  }
   if (division.fixturesGenerated) {
     throw new ApiError(400, 'Cannot add players after fixtures have been generated for this division');
   }
@@ -516,6 +548,82 @@ app.delete('/api/teams/:teamId/players/:playerId', asyncRoute((req, res) => {
     throw new ApiError(400, 'Cannot remove players once fixtures have been generated for this division');
   }
   team.playerIds = team.playerIds.filter((id) => id !== req.params.playerId);
+  writeDb(db);
+  res.json(hydrateDivision(db, division));
+}));
+
+// ---- Pairings (doubles/triples divisions only) ----
+// A Pairing is 2 (doubles) or 3 (triples) named registered players who
+// register together as one side - structurally the same idea as a Team (a
+// named group of players), but a pairing's fixtures are scored exactly like
+// a singles fixture (one continuous frame race, no legs), since
+// alternate-shot doesn't split a match into separate player-vs-player
+// mini-matches the way a team leg does.
+
+app.post('/api/divisions/:id/pairings', asyncRoute((req, res) => {
+  const { name } = req.body;
+  if (!name || !name.trim()) throw new ApiError(400, 'Pairing name is required');
+
+  const db = readDb();
+  const division = db.divisions.find((d) => d.id === req.params.id);
+  if (!division) throw new ApiError(404, 'Division not found');
+  if (division.entryType !== 'doubles') throw new ApiError(400, 'This is not a doubles/triples division');
+  if (division.fixturesGenerated) {
+    throw new ApiError(400, 'Cannot add pairings after fixtures have been generated for this division');
+  }
+
+  const pairing = { id: uuid(), divisionId: division.id, name: name.trim(), playerIds: [] };
+  db.pairings.push(pairing);
+  division.pairingIds.push(pairing.id);
+  writeDb(db);
+  res.status(201).json(hydrateDivision(db, division));
+}));
+
+app.delete('/api/divisions/:id/pairings/:pairingId', asyncRoute((req, res) => {
+  const db = readDb();
+  const division = db.divisions.find((d) => d.id === req.params.id);
+  if (!division) throw new ApiError(404, 'Division not found');
+  if (division.fixturesGenerated) {
+    throw new ApiError(400, 'Cannot remove pairings after fixtures have been generated for this division');
+  }
+  division.pairingIds = division.pairingIds.filter((id) => id !== req.params.pairingId);
+  writeDb(db);
+  res.json(hydrateDivision(db, division));
+}));
+
+app.post('/api/pairings/:pairingId/players', asyncRoute((req, res) => {
+  const { playerId } = req.body;
+  if (!playerId) throw new ApiError(400, 'playerId is required');
+
+  const db = readDb();
+  const pairing = db.pairings.find((p) => p.id === req.params.pairingId);
+  if (!pairing) throw new ApiError(404, 'Pairing not found');
+  const division = db.divisions.find((d) => d.id === pairing.divisionId);
+  if (division.fixturesGenerated) {
+    throw new ApiError(400, 'Cannot add players once fixtures have been generated for this division');
+  }
+  if (pairing.playerIds.length >= division.pairingSize) {
+    throw new ApiError(400, `This pairing already has the maximum of ${division.pairingSize} player(s)`);
+  }
+
+  const player = registeredPlayers(db).find((p) => p.id === playerId);
+  if (!player) throw new ApiError(400, 'Only registered, active users can be added as players - pick a name from the list');
+  if (!pairing.playerIds.includes(player.id)) {
+    pairing.playerIds.push(player.id);
+  }
+  writeDb(db);
+  res.status(201).json(hydrateDivision(db, division));
+}));
+
+app.delete('/api/pairings/:pairingId/players/:playerId', asyncRoute((req, res) => {
+  const db = readDb();
+  const pairing = db.pairings.find((p) => p.id === req.params.pairingId);
+  if (!pairing) throw new ApiError(404, 'Pairing not found');
+  const division = db.divisions.find((d) => d.id === pairing.divisionId);
+  if (division.fixturesGenerated) {
+    throw new ApiError(400, 'Cannot remove players once fixtures have been generated for this division');
+  }
+  pairing.playerIds = pairing.playerIds.filter((id) => id !== req.params.playerId);
   writeDb(db);
   res.json(hydrateDivision(db, division));
 }));
@@ -865,10 +973,26 @@ app.post('/api/divisions/:id/generate-fixtures', asyncRoute((req, res) => {
     throw new ApiError(400, 'Fixtures have already been generated for this division');
   }
 
-  const entrantIds = division.entryType === 'teams' ? division.teamIds : division.playerIds;
-  const entrantLabel = division.entryType === 'teams' ? 'teams' : 'players';
+  const entrantIds = division.entryType === 'teams'
+    ? division.teamIds
+    : division.entryType === 'doubles'
+      ? division.pairingIds
+      : division.playerIds;
+  const entrantLabel = division.entryType === 'teams' ? 'teams' : division.entryType === 'doubles' ? 'pairings' : 'players';
   if (entrantIds.length < 2) {
     throw new ApiError(400, `A division needs at least 2 ${entrantLabel} before fixtures can be generated`);
+  }
+  if (division.entryType === 'doubles') {
+    const incomplete = db.pairings.filter(
+      (p) => division.pairingIds.includes(p.id) && p.playerIds.length !== division.pairingSize
+    );
+    if (incomplete.length > 0) {
+      throw new ApiError(
+        400,
+        `Every pairing needs exactly ${division.pairingSize} player(s) before fixtures can be generated - ` +
+          `incomplete: ${incomplete.map((p) => p.name).join(', ')}`
+      );
+    }
   }
 
   if (division.scheduling === 'knockout_single_elim') {
@@ -877,10 +1001,11 @@ app.post('/api/divisions/:id/generate-fixtures', asyncRoute((req, res) => {
     let bracketSize = 1;
     while (bracketSize < entrantIds.length) bracketSize *= 2;
     if (entrantIds.length < 4 || bracketSize !== entrantIds.length) {
+      const entrantNoun = entrantLabel === 'teams' ? 'a team' : entrantLabel === 'pairings' ? 'a pairing' : 'a player';
       throw new ApiError(
         400,
         `Double elimination requires a power-of-two number of ${entrantLabel} (4, 8, 16, 32...) - ` +
-          `you have ${entrantIds.length}. Add or remove ${entrantLabel === 'teams' ? 'a team' : 'a player'} to reach one, or switch to single elimination.`
+          `you have ${entrantIds.length}. Add or remove ${entrantNoun} to reach one, or switch to single elimination.`
       );
     }
     generateDoubleElimFixtures({ db, league, division, entrantIds });
@@ -917,6 +1042,13 @@ app.get('/api/fixtures/:id', requireAuth, asyncRoute((req, res) => {
       awayPlayer: leg.awayPlayerId ? db.players.find((p) => p.id === leg.awayPlayerId) : null,
     }));
     return res.json({ ...fixture, divisionName, legs, homeTeam, awayTeam, bothEntrantsKnown: !!(fixture.homeTeamId && fixture.awayTeamId) });
+  }
+
+  if (division.entryType === 'doubles') {
+    const withPlayers = (pairing) => (pairing ? { ...pairing, players: db.players.filter((p) => pairing.playerIds.includes(p.id)) } : null);
+    const homePairing = withPlayers(db.pairings.find((p) => p.id === fixture.homePlayerId));
+    const awayPairing = withPlayers(db.pairings.find((p) => p.id === fixture.awayPlayerId));
+    return res.json({ ...fixture, divisionName, homePairing, awayPairing, bothEntrantsKnown: !!(fixture.homePlayerId && fixture.awayPlayerId) });
   }
 
   const homePlayer = fixture.homePlayerId ? db.players.find((p) => p.id === fixture.homePlayerId) : null;
@@ -1146,7 +1278,7 @@ app.post('/api/fixtures/:id/override', requireAdmin, asyncRoute((req, res) => {
     throw new ApiError(400, 'homeScore and awayScore must be non-negative whole numbers');
   }
   if (!isTeams && homeScore === awayScore) {
-    throw new ApiError(400, 'Singles matches cannot end level - set different scores for home and away');
+    throw new ApiError(400, 'This match cannot end level - set different scores for home and away');
   }
 
   const oldWinnerId = isTeams ? fixture.winnerTeamId : fixture.winnerPlayerId;
