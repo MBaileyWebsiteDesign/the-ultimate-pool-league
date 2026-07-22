@@ -69,6 +69,36 @@ function AdminOverridePanel({ fixture, isTeams, isDoubles, onChange }) {
   );
 }
 
+// Shows the OBS Browser Source URL for this fixture's stream overlay
+// (StreamOverlay.jsx / GET /api/overlay/fixtures/:id - see that page for the
+// design notes) with a one-click copy button, so an admin can grab the link
+// without hand-editing a URL. Admin-only since it's a broadcast-setup tool,
+// not something a spectator needs.
+function StreamOverlayLink({ fixtureId }) {
+  const [copied, setCopied] = useState(false);
+  const url = `${window.location.origin}/overlay/${fixtureId}`;
+
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard access can be blocked (insecure context, permissions) -
+      // the URL is still selectable/copyable by hand in that case.
+    }
+  };
+
+  return (
+    <p className="muted" style={{ fontSize: '0.85rem' }}>
+      Stream overlay (OBS Browser Source): <code>{url}</code>{' '}
+      <button className="btn" type="button" onClick={onCopy}>
+        {copied ? 'Copied!' : 'Copy link'}
+      </button>
+    </p>
+  );
+}
+
 function LegNominationForm({ fixture, leg, onChange, setError }) {
   const [homePlayerId, setHomePlayerId] = useState('');
   const [awayPlayerId, setAwayPlayerId] = useState('');
@@ -376,6 +406,7 @@ export default function FixtureDetail() {
     <div>
       <p><Link to={`/divisions/${fixture.divisionId}`}>&larr; Back to division</Link></p>
       <h1>{roundLabel(fixture)}{isTeams ? ` · Best of ${fixture.legs.length} legs` : ` · Race to ${fixture.raceTo}`}</h1>
+      {isAdminSession && <StreamOverlayLink fixtureId={fixture.id} />}
       {error && <p className="error">{error}</p>}
 
       {isTeams ? (

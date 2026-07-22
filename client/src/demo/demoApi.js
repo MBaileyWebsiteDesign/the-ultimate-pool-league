@@ -1227,6 +1227,12 @@ export const demoApi = {
       swapped.push({ fixtureId: fixture.id, round: fixture.round });
     }
     division.playerIds.push(incomingPlayerId);
+    // A 'retirement' also drops the outgoing player from the roster, so
+    // their row disappears from the League Table - unlike a plain
+    // 'substitution', where they stay listed with their played-so-far
+    // record frozen. Either way, computeStandings only ever aggregates a
+    // row from that row's own fixtures, so this never touches opponents'
+    // already-completed results.
     if (reason === 'retirement') {
       division.playerIds = division.playerIds.filter((id) => id !== outgoingPlayerId);
     }
@@ -1270,6 +1276,81 @@ export const demoApi = {
     const homePlayer = fixture.homePlayerId ? db.players.find((p) => p.id === fixture.homePlayerId) : null;
     const awayPlayer = fixture.awayPlayerId ? db.players.find((p) => p.id === fixture.awayPlayerId) : null;
     return { ...fixture, divisionName, homePlayer, awayPlayer, bothEntrantsKnown: !!(fixture.homePlayerId && fixture.awayPlayerId) };
+  }),
+
+  // Ported from server/src/index.js's GET /api/overlay/fixtures/:id (see the
+  // design notes there) - normalizes singles/teams/doubles into the same
+  // { home, away } shape for the OBS-facing stream overlay page. There's no
+  // real auth boundary in demo mode to begin with, so this is really just
+  // "the same data, reshaped" rather than a public-vs-private distinction.
+  getOverlayFixture: op((id) => {
+    const fixture = db.fixtures.find((f) => f.id === id);
+    if (!fixture) throw new ApiError(404, 'Fixture not found');
+    const division = db.divisions.find((d) => d.id === fixture.divisionId);
+    const league = db.leagues.find((l) => l.id === fixture.leagueId);
+    const isTeams = division.entryType === 'teams';
+    const isDoubles = division.entryType === 'doubles';
+    const BRACKET_ROLE_LABEL = {
+      winners: 'Winners Bracket',
+      losers: 'Losers Bracket',
+      grand_final: 'Grand Final',
+      grand_final_reset: 'Grand Final - Bracket Reset',
+    };
+    const roundLabel = fixture.bracketRole && fixture.bracketRole !== 'single'
+      ? (BRACKET_ROLE_LABEL[fixture.bracketRole] || `Round ${fixture.round}`)
+      : `Round ${fixture.round}`;
+
+    let home, away, raceTo = null, legsTotal = null, winner = null, bothEntrantsKnown;
+
+    if (isTeams) {
+      const homeTeam = fixture.homeTeamId ? db.teams.find((t) => t.id === fixture.homeTeamId) : null;
+      const awayTeam = fixture.awayTeamId ? db.teams.find((t) => t.id === fixture.awayTeamId) : null;
+      home = { name: homeTeam ? homeTeam.name : 'TBD', subLabel: null, score: fixture.homeLegsWon };
+      away = { name: awayTeam ? awayTeam.name : 'TBD', subLabel: null, score: fixture.awayLegsWon };
+      legsTotal = fixture.legs.length;
+      bothEntrantsKnown = !!(fixture.homeTeamId && fixture.awayTeamId);
+      if (fixture.status === 'completed') {
+        winner = fixture.winnerTeamId === null ? 'draw' : (fixture.winnerTeamId === fixture.homeTeamId ? 'home' : 'away');
+      }
+    } else if (isDoubles) {
+      const nameOfPairing = (pairing) => (pairing
+        ? { name: pairing.name, subLabel: db.players.filter((p) => pairing.playerIds.includes(p.id)).map((p) => p.name).join(' & ') }
+        : { name: 'TBD', subLabel: null });
+      const homePairing = fixture.homePlayerId ? db.pairings.find((p) => p.id === fixture.homePlayerId) : null;
+      const awayPairing = fixture.awayPlayerId ? db.pairings.find((p) => p.id === fixture.awayPlayerId) : null;
+      home = { ...nameOfPairing(homePairing), score: fixture.homeFrameScore };
+      away = { ...nameOfPairing(awayPairing), score: fixture.awayFrameScore };
+      raceTo = fixture.raceTo;
+      bothEntrantsKnown = !!(fixture.homePlayerId && fixture.awayPlayerId);
+      if (fixture.status === 'completed') {
+        winner = fixture.winnerPlayerId === fixture.homePlayerId ? 'home' : 'away';
+      }
+    } else {
+      const homePlayer = fixture.homePlayerId ? db.players.find((p) => p.id === fixture.homePlayerId) : null;
+      const awayPlayer = fixture.awayPlayerId ? db.players.find((p) => p.id === fixture.awayPlayerId) : null;
+      home = { name: homePlayer ? homePlayer.name : 'TBD', subLabel: null, score: fixture.homeFrameScore };
+      away = { name: awayPlayer ? awayPlayer.name : 'TBD', subLabel: null, score: fixture.awayFrameScore };
+      raceTo = fixture.raceTo;
+      bothEntrantsKnown = !!(fixture.homePlayerId && fixture.awayPlayerId);
+      if (fixture.status === 'completed') {
+        winner = fixture.winnerPlayerId === fixture.homePlayerId ? 'home' : 'away';
+      }
+    }
+
+    return {
+      fixtureId: fixture.id,
+      leagueName: league ? league.name : null,
+      divisionName: division ? division.name : null,
+      roundLabel,
+      entryType: division.entryType,
+      status: fixture.status,
+      bothEntrantsKnown,
+      home,
+      away,
+      raceTo,
+      legsTotal,
+      winner,
+    };
   }),
 
   recordFrame: op((fixtureId, winnerPlayerId) => {

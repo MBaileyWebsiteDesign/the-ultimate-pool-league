@@ -141,14 +141,21 @@ full-featured competition management that Wix has no built-in system for.
 - **Venues**: a curated, admin-approved list of venues (seeded with a starter set). New
   venue names typed at registration or in a profile edit are automatically queued for
   approval rather than requiring a separate step - see **Venues** below.
+- **Stream overlay (OBS Browser Source)**: a standalone, unauthenticated page at
+  `/overlay/:fixtureId` showing a live-updating scoreboard for one fixture - entrant
+  names, score, race-to/best-of-N target, and status - on a transparent background
+  designed to be keyed over video in OBS (or any other streaming software with a
+  browser-source layer). Works for singles, teams, and doubles/triples fixtures alike.
+  See **Stream overlay** below.
 
 ## What's deliberately out of scope for v1
 
-Handicaps, online entry/payment, tablet-specific UI, stream overlays and timers, table
-booking, and mini-knockout/mixed formats (double elimination and doubles/triples are now
+Handicaps, online entry/payment, tablet-specific UI, shot/match timers, table booking,
+and mini-knockout/mixed formats (double elimination and doubles/triples are now
 implemented - see **Knockout / double-elimination format** and **Doubles / triples
-format** above). Team-specific captain tools (roster management, leg nominations from
-the Captain Portal) are also deferred until team leagues are actively in use — the
+format** above; a stream overlay is also now implemented - see **Stream overlay**
+below). Team-specific captain tools (roster management, leg nominations from the
+Captain Portal) are also deferred until team leagues are actively in use — the
 `isCaptain` flag exists now so accounts are ready ahead of that. Mid-season player
 substitution (see **Player substitution** below) is singles-only for now - swapping a
 player out of a doubles/triples pairing, or a team roster, isn't covered yet.
@@ -310,6 +317,30 @@ in the shared dropdown for anyone else until an admin approves it from the Admin
 → "Manage Venues", where pending requests show who asked for each one and can be
 approved or rejected with one click.
 
+## Stream overlay
+
+Every fixture has a matching scoreboard page at `/overlay/:fixtureId` (the same
+`:fixtureId` as its normal `/fixtures/:fixtureId` page - an admin can copy the link
+directly from a "Copy link" button on the fixture page's Admin-only "Stream overlay"
+panel). Add that URL as an OBS **Browser Source** (or the equivalent in other streaming
+software) to key a live scoreboard over a table camera or commentary feed:
+
+- Shows both entrant names (plus, for a doubles/triples pairing, a smaller sub-line of
+  its member names), the live score, a status pill (Upcoming/Live/Final), and the
+  race-to or best-of-N-legs target.
+- Polls the score every 5 seconds rather than opening a websocket - "close enough to
+  live" for a pool match, with no extra server infrastructure required.
+- Deliberately **outside** the normal app shell and login: no header, no breadcrumbs,
+  transparent background, and backed by a public, unauthenticated endpoint
+  (`GET /api/overlay/fixtures/:id`) rather than the regular (login-required)
+  `GET /api/fixtures/:id`, since OBS's Browser Source has no way to supply a login
+  token. That endpoint deliberately returns only what a scoreboard graphic needs
+  (entrant names/scores/status), not the full fixture record (frame history, ids,
+  admin-override metadata) the authenticated endpoint exposes.
+- Works identically for singles, teams, and doubles/triples fixtures - the endpoint
+  normalizes all three into the same `{ home, away }` shape server-side, so the overlay
+  page itself never needs to branch on the division's `entryType`.
+
 ## Architecture
 
 ```
@@ -339,7 +370,8 @@ pool-league/
       pages/                LeagueList, LeagueDetail, DivisionDetail, FixtureDetail,
                             PlayerProfile, Login, Register, PlayerPortal, CaptainPortal,
                             AdminPortal, AdminSeasonWizard, AdminUsers, AdminUserEdit,
-                            AdminAuditLog, AdminVenues
+                            AdminAuditLog, AdminVenues, StreamOverlay (standalone, no
+                            app shell - see "Stream overlay" above)
       components/
         Breadcrumbs.jsx      Renders the shared breadcrumb trail
         VenueSelect.jsx      Venue dropdown + "not listed" free-text fallback
@@ -523,6 +555,7 @@ the Express server to serve) rather than Pages.
 | POST | `/api/divisions/:id/generate-fixtures` | Generate the fixture list (round robin, single-elimination, or double-elimination bracket, per the division's `scheduling`; double elimination requires a power-of-two entrant count; doubles/triples requires every pairing to have exactly `pairingSize` players); optionally accepts `{ startDate, gapDays }` to also set `scheduledDate` on every fixture |
 | POST | `/api/divisions/:id/substitute-player` | Swap a player out for a replacement (singles only) - reassigns not-yet-started fixtures, leaves completed/in-progress ones alone; `reason: 'substitution'` (default) keeps the outgoing player on the League Table, `reason: 'retirement'` removes them from it (requires admin; logged) |
 | GET | `/api/fixtures/:id` | Fixture detail (requires login; singles, team, or doubles/triples - the latter includes `homePairing`/`awayPairing` instead of `homePlayer`/`awayPlayer`; includes `bothEntrantsKnown` for knockout TBD slots) |
+| GET | `/api/overlay/fixtures/:id` | Public (no login required), trimmed scoreboard summary of one fixture - powers the `/overlay/:fixtureId` OBS stream overlay page (singles, team, and doubles/triples fixtures all normalized into the same `{ home, away }` shape) |
 | POST | `/api/fixtures/:id/frames` | Record a frame winner (singles or doubles/triples) |
 | DELETE | `/api/fixtures/:id/frames/last` | Undo the last recorded frame (blocked once the result has advanced a bracket) |
 | POST | `/api/fixtures/:id/legs/:legNumber/nominate` | Nominate the two players for a team-fixture leg |
@@ -550,9 +583,9 @@ the Express server to serve) rather than Pages.
    past performance) and best-of-N handicaps.
 6. Deeper player statistics: form guides, break-and-continue / century-style stats if
    relevant to 8-ball, a "trophy cabinet" across seasons.
-7. Live-scoring niceties: tablet-optimized scoring UI, stream overlay endpoint,
-   shot/match timers — valuable but explicitly deferred until the core league engine
-   above is solid.
+7. Live-scoring niceties: tablet-optimized scoring UI and shot/match timers — valuable
+   but explicitly deferred until the core league engine above is solid (a stream
+   overlay endpoint/page is now implemented - see **Stream overlay** above).
 
 ## Seeded demo data
 
@@ -569,8 +602,13 @@ It also seeds 5 pre-approved venues (The Cue Club, Rack 'Em Sports Bar, The Gree
 Corner Pocket Tavern, Break & Run Social Club) and the default admin account
 (`admin@example.com` / `Admin12!@`) so the app is fully usable on a fresh install.
 
-Note: all 84 seeded players are created directly (not linked to a registered user
-account), purely so every division has a full roster to test against out of the box -
-they predate, and are an exception to, the "players must be registered users" rule
-described above, which only applies to rosters built going forward through the app
-itself.
+Every one of the 84 seeded players also gets its own registered `User` account (not
+just a bare `Player` roster entry), so they show up in the "pick a registered player"
+list used everywhere (division rosters, team rosters, pairings) and can log in
+themselves - a fresh install doesn't need an admin to hand-register 84 accounts before
+any of this is testable. They all share one password: **`Player123!`**. Each account's
+email is `<firstname>.<lastname>@example.com` from the player's name, lowercased (e.g.
+`suraj.singh.rathor@example.com` for "Suraj Singh Rathor"); venues are assigned
+round-robin across the 5 seeded venues purely for realistic variety. **Change or reset
+these before deploying anywhere real people can reach it** - same caveat as the seeded
+admin account above.
