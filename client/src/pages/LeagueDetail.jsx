@@ -99,6 +99,7 @@ export default function LeagueDetail() {
             <select value={scheduling} onChange={(e) => setScheduling(e.target.value)}>
               <option value="round_robin_single">Round robin (everyone plays each other once)</option>
               <option value="knockout_single_elim">Knockout (single elimination)</option>
+              <option value="knockout_double_elim">Knockout (double elimination - needs 4/8/16/32 entrants)</option>
             </select>
           </label>
           <button className="btn btn-primary" type="submit">
@@ -118,7 +119,11 @@ export default function LeagueDetail() {
                 ? `${division.teamIds.length} team${division.teamIds.length === 1 ? '' : 's'} · ${division.legsPerMatch} legs/match`
                 : `${division.playerIds.length} player${division.playerIds.length === 1 ? '' : 's'}`}
               {' · '}
-              {division.scheduling === 'knockout_single_elim' ? 'Knockout' : 'Round robin'}
+              {division.scheduling === 'knockout_single_elim'
+                ? 'Knockout (single elim)'
+                : division.scheduling === 'knockout_double_elim'
+                  ? 'Knockout (double elim)'
+                  : 'Round robin'}
               {' · '}
               {division.fixturesGenerated ? 'fixtures generated' : 'not started'}
             </p>
