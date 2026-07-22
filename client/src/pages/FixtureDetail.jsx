@@ -318,9 +318,22 @@ export default function FixtureDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fixtureId]);
 
+  // Double-elimination fixtures carry a bracketRole that's more useful to
+  // show than the raw (globally-offset) round number - e.g. a losers-bracket
+  // fixture's `round` might read "6" in an 8-player bracket, which is
+  // confusing without context.
+  const BRACKET_ROLE_LABEL = {
+    winners: 'Winners Bracket',
+    losers: 'Losers Bracket',
+    grand_final: 'Grand Final',
+    grand_final_reset: 'Grand Final — Bracket Reset',
+  };
+  const roundLabel = (f) =>
+    f.bracketRole && f.bracketRole !== 'single' ? BRACKET_ROLE_LABEL[f.bracketRole] || `Round ${f.round}` : `Round ${f.round}`;
+
   useSetBreadcrumbs(
     fixture
-      ? [{ label: 'Home', to: '/' }, { label: fixture.divisionName || 'Division', to: `/divisions/${fixture.divisionId}` }, { label: `Round ${fixture.round}` }]
+      ? [{ label: 'Home', to: '/' }, { label: fixture.divisionName || 'Division', to: `/divisions/${fixture.divisionId}` }, { label: roundLabel(fixture) }]
       : [{ label: 'Home', to: '/' }, { label: 'Loading…' }]
   );
 
@@ -334,7 +347,7 @@ export default function FixtureDetail() {
   return (
     <div>
       <p><Link to={`/divisions/${fixture.divisionId}`}>&larr; Back to division</Link></p>
-      <h1>Round {fixture.round}{isTeams ? ` · Best of ${fixture.legs.length} legs` : ` · Race to ${fixture.raceTo}`}</h1>
+      <h1>{roundLabel(fixture)}{isTeams ? ` · Best of ${fixture.legs.length} legs` : ` · Race to ${fixture.raceTo}`}</h1>
       {error && <p className="error">{error}</p>}
 
       {isTeams ? (

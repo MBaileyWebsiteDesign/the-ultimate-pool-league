@@ -4,6 +4,12 @@ import { api } from '../api.js';
 import { useAuth } from '../AuthContext.jsx';
 import { useSetBreadcrumbs } from '../BreadcrumbContext.jsx';
 
+function generateFixturesLabel(division) {
+  if (division.scheduling === 'knockout_single_elim') return 'Generate Fixtures (single-elimination knockout)';
+  if (division.scheduling === 'knockout_double_elim') return 'Generate Fixtures (double-elimination knockout)';
+  return 'Generate Fixtures (round robin, play each other once)';
+}
+
 function SinglesRoster({ division, registeredPlayers, onChange, setError }) {
   const [playerId, setPlayerId] = useState('');
   const alreadyIn = new Set(division.players.map((p) => p.id));
@@ -70,7 +76,7 @@ function SinglesRoster({ division, registeredPlayers, onChange, setError }) {
           onClick={() => api.generateFixtures(division.id).then(onChange).catch((e) => setError(e.message))}
           title={division.players.length < 2 ? 'Add at least 2 players first' : ''}
         >
-          Generate Fixtures (round robin, play each other once)
+          {generateFixturesLabel(division)}
         </button>
       ) : (
         <p className="muted">Fixtures generated — player list is locked.</p>
@@ -318,7 +324,7 @@ function TeamRoster({ division, registeredPlayers, onChange, setError }) {
           onClick={() => api.generateFixtures(division.id).then(onChange).catch((e) => setError(e.message))}
           title={!canGenerate ? 'Add at least 2 teams, each with at least 1 player' : ''}
         >
-          Generate Fixtures (round robin, play each other once)
+          {generateFixturesLabel(division)}
         </button>
       ) : (
         <p className="muted">Fixtures generated — team rosters are locked.</p>
@@ -358,10 +364,41 @@ export default function DivisionDetail() {
   const nameOf = (id) =>
     (isTeams ? division.teams : division.players).find((x) => x.id === id)?.name || '—';
 
-  const fixturesByRound = {};
-  for (const fixture of division.fixtures) {
-    (fixturesByRound[fixture.round] ||= []).push(fixture);
+  // Double-elimination divisions carry a `bracketRole` on every fixture
+  // ('winners' | 'losers' | 'grand_final' | 'grand_final_reset') - group by
+  // that first, then by round within each group, so the winners bracket,
+  // losers bracket and Grand Final render as clearly separate sections
+  // instead of one interleaved round list. Everything else (round robin,
+  // single-elimination) has bracketRole 'single' and renders exactly as
+  // before - one flat list of rounds.
+  const isDoubleElim = division.scheduling === 'knockout_double_elim';
+  const BRACKET_SECTION_LABEL = {
+    winners: 'Winners Bracket',
+    losers: 'Losers Bracket',
+    grand_final: 'Grand Final',
+    grand_final_reset: 'Grand Final — Bracket Reset (decider)',
+  };
+
+  function groupByRound(fixtures) {
+    const byRound = {};
+    for (const fixture of fixtures) {
+      (byRound[fixture.round] ||= []).push(fixture);
+    }
+    // Relabel rounds 1, 2, 3... in order of appearance within this group,
+    // rather than using the raw (globally-offset) round number.
+    return Object.keys(byRound)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .map((round, i) => ({ label: `Round ${i + 1}`, fixtures: byRound[round] }));
   }
+
+  const fixturesByRound = groupByRound(division.fixtures).map((g) => [g.label, g.fixtures]);
+
+  const bracketSections = isDoubleElim
+    ? ['winners', 'losers', 'grand_final', 'grand_final_reset']
+        .map((role) => ({ role, fixtures: division.fixtures.filter((f) => f.bracketRole === role) }))
+        .filter((s) => s.fixtures.length > 0)
+    : [];
 
   return (
     <div>
@@ -438,29 +475,51 @@ export default function DivisionDetail() {
 
       <section className="card">
         <h2>Fixtures</h2>
-        {Object.keys(fixturesByRound).length === 0 && <p className="muted">No fixtures yet.</p>}
-        {Object.entries(fixturesByRound).map(([round, fixtures]) => (
-          <div key={round} className="round-block">
-            <h3>Round {round}</h3>
-            <ul className="fixture-list">
-              {fixtures.map((f) => {
-                const homeId = isTeams ? f.homeTeamId : f.homePlayerId;
-                const awayId = isTeams ? f.awayTeamId : f.awayPlayerId;
-                const homeScore = isTeams ? f.homeLegsWon : f.homeFrameScore;
-                const awayScore = isTeams ? f.awayLegsWon : f.awayFrameScore;
-                return (
-                  <li key={f.id}>
-                    <Link to={`/fixtures/${f.id}`}>
-                      {nameOf(homeId)} <strong>{homeScore} - {awayScore}</strong> {nameOf(awayId)}
-                    </Link>
-                    <span className={`status status-${f.status}`}>{f.status.replace('_', ' ')}</span>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-        ))}
+        {division.fixtures.length === 0 && <p className="muted">No fixtures yet.</p>}
+        {isDoubleElim
+          ? bracketSections.map(({ role, fixtures }) => (
+              <div key={role} className="bracket-section">
+                <h3>{BRACKET_SECTION_LABEL[role]}</h3>
+                {role === 'grand_final' || role === 'grand_final_reset' ? (
+                  <FixtureList fixtures={fixtures} isTeams={isTeams} nameOf={nameOf} />
+                ) : (
+                  groupByRound(fixtures).map(({ label, fixtures: roundFixtures }) => (
+                    <div key={label} className="round-block">
+                      <h4>{label}</h4>
+                      <FixtureList fixtures={roundFixtures} isTeams={isTeams} nameOf={nameOf} />
+                    </div>
+                  ))
+                )}
+              </div>
+            ))
+          : fixturesByRound.map(([label, fixtures]) => (
+              <div key={label} className="round-block">
+                <h3>{label}</h3>
+                <FixtureList fixtures={fixtures} isTeams={isTeams} nameOf={nameOf} />
+              </div>
+            ))}
       </section>
     </div>
+  );
+}
+
+function FixtureList({ fixtures, isTeams, nameOf }) {
+  return (
+    <ul className="fixture-list">
+      {fixtures.map((f) => {
+        const homeId = isTeams ? f.homeTeamId : f.homePlayerId;
+        const awayId = isTeams ? f.awayTeamId : f.awayPlayerId;
+        const homeScore = isTeams ? f.homeLegsWon : f.homeFrameScore;
+        const awayScore = isTeams ? f.awayLegsWon : f.awayFrameScore;
+        return (
+          <li key={f.id}>
+            <Link to={`/fixtures/${f.id}`}>
+              {nameOf(homeId)} <strong>{homeScore} - {awayScore}</strong> {nameOf(awayId)}
+            </Link>
+            <span className={`status status-${f.status}`}>{f.status.replace('_', ' ')}</span>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
