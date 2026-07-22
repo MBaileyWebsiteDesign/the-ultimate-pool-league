@@ -16,7 +16,7 @@
 // and there's no way to reset short of clearing site data.
 import demoDataSeed from './demoData.json';
 import { generateRoundRobin } from './logic/roundRobin.js';
-import { buildBracketRounds } from './logic/bracket.js';
+import { buildBracketRounds, buildDoubleElimBracket } from './logic/bracket.js';
 import { computeStandings } from './logic/standings.js';
 import { computeTeamStandings } from './logic/teamStandings.js';
 import { buildPlayerProfile } from './logic/playerProfile.js';
@@ -25,7 +25,7 @@ import { recordAudit } from './logic/auditLog.js';
 const uuid = () => crypto.randomUUID();
 const CLASSIFICATIONS = ['A', 'B', 'C', 'D'];
 const STATUSES = ['active', 'suspended'];
-const SCHEDULING_TYPES = ['round_robin_single', 'knockout_single_elim'];
+const SCHEDULING_TYPES = ['round_robin_single', 'knockout_single_elim', 'knockout_double_elim'];
 const DB_KEY = 'poolLeagueDemoDb';
 const CURRENT_USER_KEY = 'poolLeagueDemoCurrentUserId';
 
@@ -249,6 +249,10 @@ function makeSinglesFixture({ league, division, round }) {
     winnerPlayerId: null,
     nextFixtureId: null,
     nextFixtureSlot: null,
+    bracketRole: 'single', // 'single' | 'winners' | 'losers' | 'grand_final' | 'grand_final_reset'
+    loserNextFixtureId: null,
+    loserNextFixtureSlot: null,
+    resetFixtureId: null,
   };
 }
 
@@ -279,6 +283,10 @@ function makeTeamFixture({ league, division, round }) {
     winnerTeamId: null,
     nextFixtureId: null,
     nextFixtureSlot: null,
+    bracketRole: 'single',
+    loserNextFixtureId: null,
+    loserNextFixtureSlot: null,
+    resetFixtureId: null,
   };
 }
 
@@ -364,6 +372,137 @@ function generateKnockoutFixtures({ league, division, entrantIds }) {
   fixturesByRound[0].forEach((fixture) => resolveByeIfNeeded(division, fixture));
 }
 
+// Double-elimination only: sends the LOSER of a winners-bracket fixture down
+// into its assigned losers-bracket slot (mirrors propagateWinner). No-op for
+// anything other than a winners-bracket fixture - a losers-bracket loss is
+// simply an elimination, nowhere further to go.
+function propagateLoser(division, fixture, loserId) {
+  if (fixture.bracketRole !== 'winners' || !fixture.loserNextFixtureId || !loserId) return;
+  const dest = db.fixtures.find((f) => f.id === fixture.loserNextFixtureId);
+  if (!dest) return;
+  if (division.entryType === 'teams') {
+    if (fixture.loserNextFixtureSlot === 'home') dest.homeTeamId = loserId;
+    else dest.awayTeamId = loserId;
+  } else if (fixture.loserNextFixtureSlot === 'home') {
+    dest.homePlayerId = loserId;
+  } else {
+    dest.awayPlayerId = loserId;
+  }
+}
+
+// Double-elimination only: the losers-bracket champion enters the Grand
+// Final with one life already spent, the winners-bracket champion with
+// none - so if the losers-bracket entrant (always the "away" slot - see
+// generateDoubleElimFixtures) wins the Grand Final, a single decider
+// ("bracket reset") is required to settle the title. No-op once a reset has
+// already been created, or if the winners-bracket (home) side won outright.
+function checkGrandFinalReset(division, fixture) {
+  if (fixture.bracketRole !== 'grand_final' || fixture.status !== 'completed' || fixture.resetFixtureId) return;
+  const isTeams = division.entryType === 'teams';
+  const winnerId = isTeams ? fixture.winnerTeamId : fixture.winnerPlayerId;
+  const awayId = isTeams ? fixture.awayTeamId : fixture.awayPlayerId;
+  if (!winnerId || winnerId !== awayId) return;
+
+  const league = db.leagues.find((l) => l.id === division.leagueId);
+  const makeFixture = isTeams ? makeTeamFixture : makeSinglesFixture;
+  const reset = makeFixture({ league, division, round: fixture.round + 1 });
+  reset.bracketRole = 'grand_final_reset';
+  if (isTeams) {
+    reset.homeTeamId = fixture.homeTeamId;
+    reset.awayTeamId = fixture.awayTeamId;
+  } else {
+    reset.homePlayerId = fixture.homePlayerId;
+    reset.awayPlayerId = fixture.awayPlayerId;
+  }
+  db.fixtures.push(reset);
+  fixture.resetFixtureId = reset.id;
+}
+
+// Double-elimination fixture generation - see server/src/index.js's
+// generateDoubleElimFixtures for the full design notes (this is a direct
+// port, adapted only for demoApi's closed-over `db` instead of a db param).
+function generateDoubleElimFixtures({ league, division, entrantIds }) {
+  const makeFixture = division.entryType === 'teams' ? makeTeamFixture : makeSinglesFixture;
+  const { winnersRounds, losersRounds } = buildDoubleElimBracket(entrantIds);
+
+  const wbByRound = winnersRounds.map((pairs, roundIndex) =>
+    pairs.map(() => {
+      const f = makeFixture({ league, division, round: roundIndex + 1 });
+      f.bracketRole = 'winners';
+      return f;
+    })
+  );
+  for (let round = 0; round < wbByRound.length - 1; round++) {
+    wbByRound[round].forEach((fixture, i) => {
+      const next = wbByRound[round + 1][Math.floor(i / 2)];
+      fixture.nextFixtureId = next.id;
+      fixture.nextFixtureSlot = i % 2 === 0 ? 'home' : 'away';
+    });
+  }
+  winnersRounds[0].forEach(([a, b], i) => {
+    const fixture = wbByRound[0][i];
+    if (division.entryType === 'teams') {
+      fixture.homeTeamId = a;
+      fixture.awayTeamId = b;
+    } else {
+      fixture.homePlayerId = a;
+      fixture.awayPlayerId = b;
+    }
+  });
+
+  const lbByRound = losersRounds.map((round, roundIndex) =>
+    Array.from({ length: round.matchCount }, () => {
+      const f = makeFixture({ league, division, round: wbByRound.length + roundIndex + 1 });
+      f.bracketRole = 'losers';
+      return f;
+    })
+  );
+  for (let round = 0; round < lbByRound.length - 1; round++) {
+    const current = lbByRound[round];
+    const next = lbByRound[round + 1];
+    const nextIsMergeRound = losersRounds[round + 1].feedsFromWinnersRound !== null;
+    current.forEach((fixture, i) => {
+      if (nextIsMergeRound) {
+        fixture.nextFixtureId = next[i].id;
+        fixture.nextFixtureSlot = 'home';
+      } else {
+        const target = next[Math.floor(i / 2)];
+        fixture.nextFixtureId = target.id;
+        fixture.nextFixtureSlot = i % 2 === 0 ? 'home' : 'away';
+      }
+    });
+  }
+  losersRounds.forEach((lbRound, lbRoundIndex) => {
+    if (lbRound.feedsFromWinnersRound === null) return;
+    const wbSourceFixtures = wbByRound[lbRound.feedsFromWinnersRound];
+    const lbDestFixtures = lbByRound[lbRoundIndex];
+    wbSourceFixtures.forEach((fixture, i) => {
+      let dest, slot;
+      if (lbRoundIndex === 0) {
+        dest = lbDestFixtures[Math.floor(i / 2)];
+        slot = i % 2 === 0 ? 'home' : 'away';
+      } else {
+        dest = lbDestFixtures[i];
+        slot = 'away';
+      }
+      fixture.loserNextFixtureId = dest.id;
+      fixture.loserNextFixtureSlot = slot;
+    });
+  });
+
+  const wbFinal = wbByRound[wbByRound.length - 1][0];
+  const lbFinal = lbByRound[lbByRound.length - 1][0];
+  const grandFinal = makeFixture({ league, division, round: wbByRound.length + lbByRound.length + 1 });
+  grandFinal.bracketRole = 'grand_final';
+  wbFinal.nextFixtureId = grandFinal.id;
+  wbFinal.nextFixtureSlot = 'home';
+  lbFinal.nextFixtureId = grandFinal.id;
+  lbFinal.nextFixtureSlot = 'away';
+
+  const allFixtures = [...wbByRound.flat(), ...lbByRound.flat(), grandFinal];
+  allFixtures.forEach((f) => db.fixtures.push(f));
+}
+
 function assignScheduledDates(division, startDate, gapDays) {
   if (!startDate || !gapDays) return;
   const base = new Date(`${startDate}T00:00:00`);
@@ -402,6 +541,9 @@ function recomputeTeamFixture(division, fixture) {
 
   if (!wasCompleted && fixture.status === 'completed' && fixture.winnerTeamId) {
     propagateWinner(division, fixture, fixture.winnerTeamId);
+    const loserTeamId = fixture.winnerTeamId === fixture.homeTeamId ? fixture.awayTeamId : fixture.homeTeamId;
+    propagateLoser(division, fixture, loserTeamId);
+    checkGrandFinalReset(division, fixture);
   }
 }
 
@@ -851,6 +993,13 @@ export const demoApi = {
     if (fixture.nextFixtureId && newWinnerId && newWinnerId !== oldWinnerId) {
       propagateWinner(division, fixture, newWinnerId);
     }
+    if (newWinnerId && newWinnerId !== oldWinnerId) {
+      const newLoserId = newWinnerId === (isTeams ? fixture.homeTeamId : fixture.homePlayerId)
+        ? (isTeams ? fixture.awayTeamId : fixture.awayPlayerId)
+        : (isTeams ? fixture.homeTeamId : fixture.homePlayerId);
+      propagateLoser(division, fixture, newLoserId);
+    }
+    checkGrandFinalReset(division, fixture);
     recordAudit(db, {
       actor: adminLabel(), action: 'fixture.override', targetType: 'fixture', targetId: fixture.id,
       details: `Set final score to ${homeScore}-${awayScore}`,
@@ -938,6 +1087,17 @@ export const demoApi = {
     if (entrantIds.length < 2) throw new ApiError(400, `A division needs at least 2 ${entrantLabel} before fixtures can be generated`);
     if (division.scheduling === 'knockout_single_elim') {
       generateKnockoutFixtures({ league, division, entrantIds });
+    } else if (division.scheduling === 'knockout_double_elim') {
+      let bracketSize = 1;
+      while (bracketSize < entrantIds.length) bracketSize *= 2;
+      if (entrantIds.length < 4 || bracketSize !== entrantIds.length) {
+        throw new ApiError(
+          400,
+          `Double elimination requires a power-of-two number of ${entrantLabel} (4, 8, 16, 32...) - ` +
+            `you have ${entrantIds.length}. Add or remove ${entrantLabel === 'teams' ? 'a team' : 'a player'} to reach one, or switch to single elimination.`
+        );
+      }
+      generateDoubleElimFixtures({ league, division, entrantIds });
     } else {
       generateRoundRobinFixtures({ league, division, entrantIds });
     }
@@ -1046,7 +1206,12 @@ export const demoApi = {
       fixture.status = 'completed';
       fixture.winnerPlayerId = fixture.awayPlayerId;
     }
-    if (fixture.status === 'completed') propagateWinner(division, fixture, fixture.winnerPlayerId);
+    if (fixture.status === 'completed') {
+      propagateWinner(division, fixture, fixture.winnerPlayerId);
+      const loserPlayerId = fixture.winnerPlayerId === fixture.homePlayerId ? fixture.awayPlayerId : fixture.homePlayerId;
+      propagateLoser(division, fixture, loserPlayerId);
+      checkGrandFinalReset(division, fixture);
+    }
     return fixture;
   }),
 
@@ -1056,6 +1221,9 @@ export const demoApi = {
     if (fixture.frames.length === 0) throw new ApiError(400, 'No frames recorded yet');
     if (fixture.nextFixtureId && fixture.status === 'completed') {
       throw new ApiError(400, 'This result has already advanced a player to the next round and cannot be undone here');
+    }
+    if (fixture.resetFixtureId) {
+      throw new ApiError(400, 'This Grand Final result already triggered a bracket-reset decider and cannot be undone here');
     }
     fixture.frames.pop();
     fixture.homeFrameScore = fixture.frames.filter((f) => f.winnerPlayerId === fixture.homePlayerId).length;
@@ -1152,6 +1320,9 @@ export const demoApi = {
     if (leg.frames.length === 0) throw new ApiError(400, 'No frames recorded yet for this leg');
     if (fixture.nextFixtureId && fixture.status === 'completed') {
       throw new ApiError(400, 'This result has already advanced a team to the next round and cannot be undone here');
+    }
+    if (fixture.resetFixtureId) {
+      throw new ApiError(400, 'This Grand Final result already triggered a bracket-reset decider and cannot be undone here');
     }
     leg.frames.pop();
     leg.homeFrameScore = leg.frames.filter((f) => f.winnerPlayerId === leg.homePlayerId).length;
