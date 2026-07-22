@@ -19,7 +19,9 @@ full-featured competition management that Wix has no built-in system for.
   scheduling method).
 - **Divisions** within a league (unlimited), each independently configured along two
   axes:
-  - **Entry type** — `singles` (one player vs. one player) or `teams` (team vs. team).
+  - **Entry type** — `singles` (one player vs. one player), `teams` (team vs. team), or
+    `doubles` (a named 2-3 player `Pairing` vs. `Pairing`, alternate-shot - see
+    **Doubles / triples format** below).
   - **Scheduling** — `round_robin_single` (everyone/every team plays everyone/every
     team else exactly once), `knockout_single_elim` (single-elimination bracket), or
     `knockout_double_elim` (double-elimination: winners bracket + losers bracket +
@@ -68,10 +70,26 @@ full-featured competition management that Wix has no built-in system for.
   a clear error asking you to add/remove an entrant or use single elimination instead.
   See `server/src/services/bracket.js` (`buildDoubleElimBracket`) for the full seeding
   design notes.
-- **Player registration** per division (singles) or per team (teams), picked from the
-  list of people who've actually created an account (see **Accounts & login** below) -
-  rosters can't be padded with made-up names. Rosters lock once fixtures are generated,
-  which mirrors how real leagues avoid re-shuffling a season that's already started.
+- **Doubles / triples format**: a `Pairing` is 2 (doubles) or 3 (triples) named
+  registered players (`pairingSize`, set per division) who register together and play
+  alternate-shot as one side. Structurally a Pairing is just a named group of players
+  like a Team, but its fixtures are scored exactly like a singles fixture - one
+  continuous frame race, no legs - since alternate-shot doesn't split a match into
+  separate player-vs-player mini-matches the way a team leg does; recording a frame
+  just records which pairing won it. This works with every scheduling method (round
+  robin, single or double elimination) with no special-casing, since a doubles/triples
+  fixture is literally a singles fixture whose `homePlayerId`/`awayPlayerId` happen to
+  hold a Pairing id instead of a Player id. Every pairing needs exactly `pairingSize`
+  players before fixtures can be generated for the division. Individual players inside
+  a pairing don't get personal career stats from doubles play (their profile page only
+  tracks singles fixtures and team legs) - the Pairing itself is the entrant standings
+  and results are tracked against, shown on the division page rather than a dedicated
+  profile.
+- **Player registration** per division (singles), per team (teams), or per pairing
+  (doubles/triples), picked from the list of people who've actually created an account
+  (see **Accounts & login** below) - rosters can't be padded with made-up names. Rosters
+  lock once fixtures are generated, which mirrors how real leagues avoid re-shuffling a
+  season that's already started.
 - **Automatic fixture generation**: circle-method round-robin (handling odd counts via
   a bye) or knockout bracket generation, depending on the division's `scheduling`, with
   optional automatic date scheduling (a start date plus a "days between rounds" gap —
@@ -80,9 +98,10 @@ full-featured competition management that Wix has no built-in system for.
   automatically the moment either side reaches the race target (e.g. race to 6 ends
   at 6–5, 6–0, 6–3, etc. — never plays on past the target), with the last frame
   reversible for corrections (unless that result already advanced a bracket).
-- **Live standings**: singles divisions rank by points (2 for a win)/frames
-  for/against/difference; team divisions rank by points (2/1/0 for win/draw/loss)/legs
-  for/against/difference — both computed automatically from completed results.
+- **Live standings**: singles and doubles/triples divisions rank by points (2 for a
+  win)/frames for/against/difference (a doubles/triples table ranks Pairings, not
+  individual players); team divisions rank by points (2/1/0 for win/draw/loss)/legs
+  for/against/difference — all computed automatically from completed results.
 - **Player stats & profiles**: every player has a profile page showing career record
   (played/won/lost, frames for/against, frame difference) aggregated across both singles
   fixtures and legs played inside team fixtures, plus a head-to-head breakdown per
@@ -126,11 +145,13 @@ full-featured competition management that Wix has no built-in system for.
 ## What's deliberately out of scope for v1
 
 Handicaps, online entry/payment, tablet-specific UI, stream overlays and timers, table
-booking, and mini-knockout/mixed formats (double elimination is now implemented - see
-**Knockout / double-elimination format** above). Team-specific captain
-tools (roster management, leg nominations from the Captain Portal) are also deferred
-until team leagues are actively in use — the `isCaptain` flag exists now so accounts are
-ready ahead of that.
+booking, and mini-knockout/mixed formats (double elimination and doubles/triples are now
+implemented - see **Knockout / double-elimination format** and **Doubles / triples
+format** above). Team-specific captain tools (roster management, leg nominations from
+the Captain Portal) are also deferred until team leagues are actively in use — the
+`isCaptain` flag exists now so accounts are ready ahead of that. Mid-season player
+substitution (see **Player substitution** below) is singles-only for now - swapping a
+player out of a doubles/triples pairing, or a team roster, isn't covered yet.
 
 ## Accounts & login
 
@@ -338,22 +359,34 @@ script, not a rewrite. This is the top item in the roadmap.
 ## Data model
 
 - `League`: `id, name, sport, format { matchFormat, raceTo, scheduling }`
-- `Division`: `id, leagueId, name, order, entryType ('singles'|'teams'), scheduling
-  ('round_robin_single'|'knockout_single_elim'|'knockout_double_elim'), legsPerMatch
-  (teams only), playerIds[] (singles only), teamIds[] (teams only), fixturesGenerated,
+- `Division`: `id, leagueId, name, order, entryType ('singles'|'teams'|'doubles'),
+  scheduling ('round_robin_single'|'knockout_single_elim'|'knockout_double_elim'),
+  legsPerMatch (teams only), pairingSize (doubles only, 2 or 3), playerIds[] (singles
+  only), teamIds[] (teams only), pairingIds[] (doubles only), fixturesGenerated,
   startDate, endDate, gapDays` (the latter three set when fixtures were generated with
   automatic scheduling, either via the Season Setup Wizard or the division page
   directly)
 - `Player`: `id, name`
 - `Team`: `id, divisionId, name, playerIds[]`
-- Singles `Fixture`: `id, leagueId, divisionId, round, homePlayerId, awayPlayerId,
-  raceTo, frames[], homeFrameScore, awayFrameScore, status, winnerPlayerId,
-  nextFixtureId, nextFixtureSlot, bracketRole, loserNextFixtureId,
-  loserNextFixtureSlot, resetFixtureId, scheduledDate`
+- `Pairing` (doubles/triples divisions only): `id, divisionId, name, playerIds[]` (2 or
+  3 registered players, capped at the division's `pairingSize`) — structurally identical
+  to a `Team`, but a Pairing's fixtures are singles-shaped (see below), not
+  legs-based, since alternate-shot doesn't split a match into separate mini-matches.
+- Singles `Fixture` (also used for doubles/triples - see below): `id, leagueId,
+  divisionId, round, homePlayerId, awayPlayerId, raceTo, frames[], homeFrameScore,
+  awayFrameScore, status, winnerPlayerId, nextFixtureId, nextFixtureSlot, bracketRole,
+  loserNextFixtureId, loserNextFixtureSlot, resetFixtureId, scheduledDate`
   - `frames[]`: `{ frameNumber, winnerPlayerId }` — the source of truth; scores are
     derived from this list, never stored independently of it.
   - `scheduledDate`: `YYYY-MM-DD` string, set when the division's fixtures were
     generated with a start date and round gap; `null` otherwise.
+  - On a doubles/triples division, `homePlayerId`/`awayPlayerId` and `winnerPlayerId`
+    hold a `Pairing` id rather than a `Player` id (and `GET /api/fixtures/:id` returns
+    `homePairing`/`awayPairing`, hydrated with that pairing's players, instead of
+    `homePlayer`/`awayPlayer`) - everything else about the fixture (frame recording,
+    bracket propagation, undo-locking) is identical to a singles fixture, since a
+    doubles/triples match genuinely is scored the same way, just between two named
+    groups instead of two named players.
 - Team `Fixture`: `id, leagueId, divisionId, round, homeTeamId, awayTeamId, legs[],
   homeLegsWon, awayLegsWon, status, winnerTeamId (null = draw), nextFixtureId,
   nextFixtureSlot, bracketRole, loserNextFixtureId, loserNextFixtureSlot,
@@ -479,16 +512,18 @@ the Express server to serve) rather than Pages.
 | POST | `/api/fixtures/:id/override` | Directly set a fixture's final score, bypassing frame-by-frame play (requires admin; logged; blocked if it would change a winner that's already advanced a started bracket fixture) |
 | GET/POST | `/api/leagues` | List (requires login) / create leagues (requires admin) |
 | GET | `/api/leagues/:id` | League + its divisions (requires login) |
-| POST | `/api/leagues/:leagueId/divisions` | Add a division (requires admin; accepts `entryType`, `scheduling`, `legsPerMatch`) |
-| GET | `/api/divisions/:id` | Division + players/teams, fixtures, standings (requires login) |
+| POST | `/api/leagues/:leagueId/divisions` | Add a division (requires admin; accepts `entryType`, `scheduling`, `legsPerMatch`, `pairingSize`) |
+| GET | `/api/divisions/:id` | Division + players/teams/pairings, fixtures, standings (requires login) |
 | GET | `/api/registered-players` | List of players linked to a registered, active user account (requires login) - the pool a roster picks from |
 | POST/DELETE | `/api/divisions/:id/players` | Register / remove a player by `playerId` (singles, pre-fixtures only; `playerId` must belong to a registered, active user) |
 | POST/DELETE | `/api/divisions/:id/teams` | Add / remove a team (teams, pre-fixtures only) |
 | POST/DELETE | `/api/teams/:teamId/players` | Add / remove a player by `playerId` on a team roster (same registered-user requirement) |
-| POST | `/api/divisions/:id/generate-fixtures` | Generate the fixture list (round robin, single-elimination, or double-elimination bracket, per the division's `scheduling`; double elimination requires a power-of-two entrant count); optionally accepts `{ startDate, gapDays }` to also set `scheduledDate` on every fixture |
+| POST/DELETE | `/api/divisions/:id/pairings` | Add / remove a pairing (doubles/triples, pre-fixtures only) |
+| POST/DELETE | `/api/pairings/:pairingId/players` | Add / remove a player by `playerId` on a pairing (same registered-user requirement; capped at the division's `pairingSize`) |
+| POST | `/api/divisions/:id/generate-fixtures` | Generate the fixture list (round robin, single-elimination, or double-elimination bracket, per the division's `scheduling`; double elimination requires a power-of-two entrant count; doubles/triples requires every pairing to have exactly `pairingSize` players); optionally accepts `{ startDate, gapDays }` to also set `scheduledDate` on every fixture |
 | POST | `/api/divisions/:id/substitute-player` | Swap a player out for a replacement (singles only) - reassigns not-yet-started fixtures, leaves completed/in-progress ones alone; `reason: 'substitution'` (default) keeps the outgoing player on the League Table, `reason: 'retirement'` removes them from it (requires admin; logged) |
-| GET | `/api/fixtures/:id` | Fixture detail (requires login; singles or team, includes `bothEntrantsKnown` for knockout TBD slots) |
-| POST | `/api/fixtures/:id/frames` | Record a frame winner (singles) |
+| GET | `/api/fixtures/:id` | Fixture detail (requires login; singles, team, or doubles/triples - the latter includes `homePairing`/`awayPairing` instead of `homePlayer`/`awayPlayer`; includes `bothEntrantsKnown` for knockout TBD slots) |
+| POST | `/api/fixtures/:id/frames` | Record a frame winner (singles or doubles/triples) |
 | DELETE | `/api/fixtures/:id/frames/last` | Undo the last recorded frame (blocked once the result has advanced a bracket) |
 | POST | `/api/fixtures/:id/legs/:legNumber/nominate` | Nominate the two players for a team-fixture leg |
 | POST | `/api/fixtures/:id/legs/:legNumber/frames` | Record a frame winner within a leg |

@@ -37,13 +37,18 @@ class ApiError extends Error {
 }
 
 function loadInitialDb() {
+  let base;
   try {
     const raw = localStorage.getItem(DB_KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) base = JSON.parse(raw);
   } catch {
     // fall through to the bundled seed
   }
-  return structuredClone(demoDataSeed);
+  if (!base) base = structuredClone(demoDataSeed);
+  // Backfill for a seed/save that predates `pairings` (doubles/triples) -
+  // mirrors db.js's readDb() migration on the real server.
+  if (!base.pairings) base.pairings = [];
+  return base;
 }
 
 let db = loadInitialDb();
@@ -216,6 +221,14 @@ function hydrateDivision(division) {
       .map((t) => ({ ...t, players: db.players.filter((p) => t.playerIds.includes(p.id)) }));
     const standings = computeTeamStandings(division, db.fixtures, db.teams);
     return { ...division, leagueName, teams, fixtures, standings };
+  }
+
+  if (division.entryType === 'doubles') {
+    const pairings = db.pairings
+      .filter((p) => division.pairingIds.includes(p.id))
+      .map((p) => ({ ...p, players: db.players.filter((pl) => p.playerIds.includes(pl.id)) }));
+    const standings = computeStandings({ ...division, playerIds: division.pairingIds }, db.fixtures, pairings);
+    return { ...division, leagueName, pairings, fixtures, standings };
   }
 
   const players = db.players.filter((p) => division.playerIds.includes(p.id));
@@ -620,21 +633,28 @@ export const demoApi = {
     if (!user || !user.playerId) return [];
     const playerId = user.playerId;
     const myTeamIds = db.teams.filter((t) => t.playerIds.includes(playerId)).map((t) => t.id);
+    const myPairingIds = db.pairings.filter((p) => p.playerIds.includes(playerId)).map((p) => p.id);
     const fixtures = db.fixtures.filter((f) => {
       if (f.homePlayerId === playerId || f.awayPlayerId === playerId) return true;
       if (myTeamIds.includes(f.homeTeamId) || myTeamIds.includes(f.awayTeamId)) return true;
+      if (myPairingIds.includes(f.homePlayerId) || myPairingIds.includes(f.awayPlayerId)) return true;
       return false;
     });
     const enriched = fixtures.map((f) => {
       const division = db.divisions.find((d) => d.id === f.divisionId);
       const league = db.leagues.find((l) => l.id === f.leagueId);
       const isTeams = !!f.legs;
+      const isDoubles = division?.entryType === 'doubles';
       const opponentId = isTeams
         ? (myTeamIds.includes(f.homeTeamId) ? f.awayTeamId : f.homeTeamId)
-        : (f.homePlayerId === playerId ? f.awayPlayerId : f.homePlayerId);
+        : isDoubles
+          ? (myPairingIds.includes(f.homePlayerId) ? f.awayPlayerId : f.homePlayerId)
+          : (f.homePlayerId === playerId ? f.awayPlayerId : f.homePlayerId);
       const opponentName = isTeams
         ? db.teams.find((t) => t.id === opponentId)?.name
-        : db.players.find((p) => p.id === opponentId)?.name;
+        : isDoubles
+          ? db.pairings.find((p) => p.id === opponentId)?.name
+          : db.players.find((p) => p.id === opponentId)?.name;
       return {
         id: f.id,
         leagueName: league?.name,
@@ -959,7 +979,7 @@ export const demoApi = {
       throw new ApiError(400, 'homeScore and awayScore must be non-negative whole numbers');
     }
     if (!isTeams && homeScore === awayScore) {
-      throw new ApiError(400, 'Singles matches cannot end level - set different scores for home and away');
+      throw new ApiError(400, 'This match cannot end level - set different scores for home and away');
     }
     const oldWinnerId = isTeams ? fixture.winnerTeamId : fixture.winnerPlayerId;
     const newWinnerId = homeScore === awayScore
@@ -1028,20 +1048,26 @@ export const demoApi = {
   }),
 
   createDivision: op((leagueId, data) => {
-    const { name, order = 0, entryType = 'singles', legsPerMatch = 5 } = data;
+    const { name, order = 0, entryType = 'singles', legsPerMatch = 5, pairingSize = 2 } = data;
     const league = db.leagues.find((l) => l.id === leagueId);
     if (!league) throw new ApiError(404, 'League not found');
     const scheduling = data.scheduling || league.format.scheduling || 'round_robin_single';
     if (!name || !name.trim()) throw new ApiError(400, 'Division name is required');
-    if (!['singles', 'teams'].includes(entryType)) throw new ApiError(400, 'entryType must be "singles" or "teams"');
+    if (!['singles', 'teams', 'doubles'].includes(entryType)) {
+      throw new ApiError(400, 'entryType must be "singles", "teams" or "doubles"');
+    }
     if (!SCHEDULING_TYPES.includes(scheduling)) throw new ApiError(400, `scheduling must be one of: ${SCHEDULING_TYPES.join(', ')}`);
     if (entryType === 'teams' && (!Number.isInteger(Number(legsPerMatch)) || Number(legsPerMatch) < 1)) {
       throw new ApiError(400, 'legsPerMatch must be a positive whole number');
     }
+    if (entryType === 'doubles' && ![2, 3].includes(Number(pairingSize))) {
+      throw new ApiError(400, 'pairingSize must be 2 (doubles) or 3 (triples)');
+    }
     const division = {
       id: uuid(), leagueId: league.id, name: name.trim(), order, entryType, scheduling,
-      playerIds: [], teamIds: entryType === 'teams' ? [] : [],
+      playerIds: [], teamIds: [], pairingIds: [],
       legsPerMatch: entryType === 'teams' ? Number(legsPerMatch) : null,
+      pairingSize: entryType === 'doubles' ? Number(pairingSize) : null,
       gapDays: null, fixturesGenerated: false,
     };
     db.divisions.push(division);
@@ -1060,7 +1086,9 @@ export const demoApi = {
     if (!playerId) throw new ApiError(400, 'playerId is required');
     const division = db.divisions.find((d) => d.id === divisionId);
     if (!division) throw new ApiError(404, 'Division not found');
-    if (division.entryType !== 'singles') throw new ApiError(400, 'This is a team division - add players to a team instead');
+    if (division.entryType !== 'singles') {
+      throw new ApiError(400, `This is a ${division.entryType} division - add players to a ${division.entryType === 'teams' ? 'team' : 'pairing'} instead`);
+    }
     if (division.fixturesGenerated) throw new ApiError(400, 'Cannot add players after fixtures have been generated for this division');
     const player = registeredPlayers().find((p) => p.id === playerId);
     if (!player) throw new ApiError(400, 'Only registered, active users can be added as players - pick a name from the list');
@@ -1076,25 +1104,86 @@ export const demoApi = {
     return hydrateDivision(division);
   }),
 
+  createPairing: op((divisionId, name) => {
+    if (!name || !name.trim()) throw new ApiError(400, 'Pairing name is required');
+    const division = db.divisions.find((d) => d.id === divisionId);
+    if (!division) throw new ApiError(404, 'Division not found');
+    if (division.entryType !== 'doubles') throw new ApiError(400, 'This is not a doubles/triples division');
+    if (division.fixturesGenerated) throw new ApiError(400, 'Cannot add pairings after fixtures have been generated for this division');
+    const pairing = { id: uuid(), divisionId: division.id, name: name.trim(), playerIds: [] };
+    db.pairings.push(pairing);
+    division.pairingIds.push(pairing.id);
+    return hydrateDivision(division);
+  }),
+
+  removePairing: op((divisionId, pairingId) => {
+    const division = db.divisions.find((d) => d.id === divisionId);
+    if (!division) throw new ApiError(404, 'Division not found');
+    if (division.fixturesGenerated) throw new ApiError(400, 'Cannot remove pairings after fixtures have been generated for this division');
+    division.pairingIds = division.pairingIds.filter((id) => id !== pairingId);
+    return hydrateDivision(division);
+  }),
+
+  addPairingPlayer: op((pairingId, playerId) => {
+    if (!playerId) throw new ApiError(400, 'playerId is required');
+    const pairing = db.pairings.find((p) => p.id === pairingId);
+    if (!pairing) throw new ApiError(404, 'Pairing not found');
+    const division = db.divisions.find((d) => d.id === pairing.divisionId);
+    if (division.fixturesGenerated) throw new ApiError(400, 'Cannot add players once fixtures have been generated for this division');
+    if (pairing.playerIds.length >= division.pairingSize) {
+      throw new ApiError(400, `This pairing already has the maximum of ${division.pairingSize} player(s)`);
+    }
+    const player = registeredPlayers().find((p) => p.id === playerId);
+    if (!player) throw new ApiError(400, 'Only registered, active users can be added as players - pick a name from the list');
+    if (!pairing.playerIds.includes(player.id)) pairing.playerIds.push(player.id);
+    return hydrateDivision(division);
+  }),
+
+  removePairingPlayer: op((pairingId, playerId) => {
+    const pairing = db.pairings.find((p) => p.id === pairingId);
+    if (!pairing) throw new ApiError(404, 'Pairing not found');
+    const division = db.divisions.find((d) => d.id === pairing.divisionId);
+    if (division.fixturesGenerated) throw new ApiError(400, 'Cannot remove players once fixtures have been generated for this division');
+    pairing.playerIds = pairing.playerIds.filter((id) => id !== playerId);
+    return hydrateDivision(division);
+  }),
+
   generateFixtures: op((divisionId, data = {}) => {
     const { startDate, gapDays } = data;
     const division = db.divisions.find((d) => d.id === divisionId);
     if (!division) throw new ApiError(404, 'Division not found');
     const league = db.leagues.find((l) => l.id === division.leagueId);
     if (division.fixturesGenerated) throw new ApiError(400, 'Fixtures have already been generated for this division');
-    const entrantIds = division.entryType === 'teams' ? division.teamIds : division.playerIds;
-    const entrantLabel = division.entryType === 'teams' ? 'teams' : 'players';
+    const entrantIds = division.entryType === 'teams'
+      ? division.teamIds
+      : division.entryType === 'doubles'
+        ? division.pairingIds
+        : division.playerIds;
+    const entrantLabel = division.entryType === 'teams' ? 'teams' : division.entryType === 'doubles' ? 'pairings' : 'players';
     if (entrantIds.length < 2) throw new ApiError(400, `A division needs at least 2 ${entrantLabel} before fixtures can be generated`);
+    if (division.entryType === 'doubles') {
+      const incomplete = db.pairings.filter(
+        (p) => division.pairingIds.includes(p.id) && p.playerIds.length !== division.pairingSize
+      );
+      if (incomplete.length > 0) {
+        throw new ApiError(
+          400,
+          `Every pairing needs exactly ${division.pairingSize} player(s) before fixtures can be generated - ` +
+            `incomplete: ${incomplete.map((p) => p.name).join(', ')}`
+        );
+      }
+    }
     if (division.scheduling === 'knockout_single_elim') {
       generateKnockoutFixtures({ league, division, entrantIds });
     } else if (division.scheduling === 'knockout_double_elim') {
       let bracketSize = 1;
       while (bracketSize < entrantIds.length) bracketSize *= 2;
       if (entrantIds.length < 4 || bracketSize !== entrantIds.length) {
+        const entrantNoun = entrantLabel === 'teams' ? 'a team' : entrantLabel === 'pairings' ? 'a pairing' : 'a player';
         throw new ApiError(
           400,
           `Double elimination requires a power-of-two number of ${entrantLabel} (4, 8, 16, 32...) - ` +
-            `you have ${entrantIds.length}. Add or remove ${entrantLabel === 'teams' ? 'a team' : 'a player'} to reach one, or switch to single elimination.`
+            `you have ${entrantIds.length}. Add or remove ${entrantNoun} to reach one, or switch to single elimination.`
         );
       }
       generateDoubleElimFixtures({ league, division, entrantIds });
@@ -1138,12 +1227,6 @@ export const demoApi = {
       swapped.push({ fixtureId: fixture.id, round: fixture.round });
     }
     division.playerIds.push(incomingPlayerId);
-    // A 'retirement' also drops the outgoing player from the roster, so
-    // their row disappears from the League Table - unlike a plain
-    // 'substitution', where they stay listed with their played-so-far
-    // record frozen. Either way, computeStandings only ever aggregates a
-    // row from that row's own fixtures, so this never touches opponents'
-    // already-completed results.
     if (reason === 'retirement') {
       division.playerIds = division.playerIds.filter((id) => id !== outgoingPlayerId);
     }
@@ -1177,6 +1260,12 @@ export const demoApi = {
         awayPlayer: leg.awayPlayerId ? db.players.find((p) => p.id === leg.awayPlayerId) : null,
       }));
       return { ...fixture, divisionName, legs, homeTeam, awayTeam, bothEntrantsKnown: !!(fixture.homeTeamId && fixture.awayTeamId) };
+    }
+    if (division.entryType === 'doubles') {
+      const withPlayers = (pairing) => (pairing ? { ...pairing, players: db.players.filter((p) => pairing.playerIds.includes(p.id)) } : null);
+      const homePairing = withPlayers(db.pairings.find((p) => p.id === fixture.homePlayerId));
+      const awayPairing = withPlayers(db.pairings.find((p) => p.id === fixture.awayPlayerId));
+      return { ...fixture, divisionName, homePairing, awayPairing, bothEntrantsKnown: !!(fixture.homePlayerId && fixture.awayPlayerId) };
     }
     const homePlayer = fixture.homePlayerId ? db.players.find((p) => p.id === fixture.homePlayerId) : null;
     const awayPlayer = fixture.awayPlayerId ? db.players.find((p) => p.id === fixture.awayPlayerId) : null;
