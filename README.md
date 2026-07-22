@@ -21,7 +21,9 @@ full-featured competition management that Wix has no built-in system for.
   axes:
   - **Entry type** — `singles` (one player vs. one player) or `teams` (team vs. team).
   - **Scheduling** — `round_robin_single` (everyone/every team plays everyone/every
-    team else exactly once) or `knockout_single_elim` (single-elimination bracket).
+    team else exactly once), `knockout_single_elim` (single-elimination bracket), or
+    `knockout_double_elim` (double-elimination: winners bracket + losers bracket +
+    Grand Final, with a bracket-reset decider if needed - see below).
   These are independent choices, so e.g. a knockout team cup and a round-robin singles
   division can coexist in the same league.
 - **Season Setup Wizard**: a 5-step guided flow for standing up a brand-new season
@@ -48,6 +50,24 @@ full-featured competition management that Wix has no built-in system for.
   next round, that frame/leg can't be undone from the completed fixture (it would
   silently corrupt the bracket) — the fixture detail page shows "TBD" for slots that
   haven't been decided yet.
+- **Knockout / double-elimination format**: a losing entrant isn't out immediately -
+  they drop into a losers bracket and keep going until they lose a second time.
+  Structurally this is a winners bracket (identical to single elimination) plus a
+  losers bracket that interleaves each round's fresh losers with the losers bracket's
+  own survivors, finishing in a Grand Final between the two brackets' champions. Because
+  the losers-bracket entrant already has one loss and the winners-bracket entrant has
+  none, winning the Grand Final isn't enough for the losers-bracket entrant on its
+  own — beating the winners-bracket champion there only draws them level, so a single
+  **bracket-reset decider** is automatically created and must be won too; if the
+  winners-bracket champion wins the Grand Final outright, the tournament ends there.
+  The Fixtures list on the division page groups fixtures into "Winners Bracket",
+  "Losers Bracket", "Grand Final" and (if triggered) "Grand Final — Bracket Reset"
+  sections rather than one flat round list. **v1 scope**: requires an exact
+  power-of-two entrant count (4, 8, 16, 32...) - the interleaving arithmetic only lines
+  up cleanly with no byes anywhere in the winners bracket; a non-power-of-two count gets
+  a clear error asking you to add/remove an entrant or use single elimination instead.
+  See `server/src/services/bracket.js` (`buildDoubleElimBracket`) for the full seeding
+  design notes.
 - **Player registration** per division (singles) or per team (teams), picked from the
   list of people who've actually created an account (see **Accounts & login** below) -
   rosters can't be padded with made-up names. Rosters lock once fixtures are generated,
@@ -91,9 +111,7 @@ full-featured competition management that Wix has no built-in system for.
   bracket that's already progressed past that result; pure score corrections (same
   winner) are always allowed.
 - **Mid-season player substitution** (singles divisions): if a player drops out, an
-  admin can swap them for a replacement from the division's page, choosing whether it's
-  temporary cover (the outgoing player stays visible in the League Table) or the player
-  is retiring from the league (their row is removed from the table). Every fixture of
+  admin can swap them for a replacement from the division's page. Every fixture of
   theirs that hasn't been played yet moves to the replacement; anything already
   completed - or already partway through - is left exactly as it was, so history and
   standings for the games actually played never change. See **Player substitution**
@@ -108,7 +126,8 @@ full-featured competition management that Wix has no built-in system for.
 ## What's deliberately out of scope for v1
 
 Handicaps, online entry/payment, tablet-specific UI, stream overlays and timers, table
-booking, and double-elimination/mini-knockout/mixed formats. Team-specific captain
+booking, and mini-knockout/mixed formats (double elimination is now implemented - see
+**Knockout / double-elimination format** above). Team-specific captain
 tools (roster management, leg nominations from the Captain Portal) are also deferred
 until team leagues are actively in use — the `isCaptain` flag exists now so accounts are
 ready ahead of that.
@@ -285,7 +304,8 @@ pool-league/
       errors.js
       services/
         roundRobin.js    Circle-method scheduler (singles + teams)
-        bracket.js       Single-elimination bracket seeding with bye handling
+        bracket.js       Single- and double-elimination bracket seeding (bye handling
+                         for single elim; double elim requires a power-of-2 count)
         standings.js     Singles points table calculation
         teamStandings.js Team points table calculation
         playerProfile.js Career stats + head-to-head aggregation for a player
@@ -319,28 +339,37 @@ script, not a rewrite. This is the top item in the roadmap.
 
 - `League`: `id, name, sport, format { matchFormat, raceTo, scheduling }`
 - `Division`: `id, leagueId, name, order, entryType ('singles'|'teams'), scheduling
-  ('round_robin_single'|'knockout_single_elim'), legsPerMatch (teams only), playerIds[]
-  (singles only), teamIds[] (teams only), fixturesGenerated, startDate, endDate,
-  gapDays` (the latter three set when fixtures were generated with automatic
-  scheduling, either via the Season Setup Wizard or the division page directly)
+  ('round_robin_single'|'knockout_single_elim'|'knockout_double_elim'), legsPerMatch
+  (teams only), playerIds[] (singles only), teamIds[] (teams only), fixturesGenerated,
+  startDate, endDate, gapDays` (the latter three set when fixtures were generated with
+  automatic scheduling, either via the Season Setup Wizard or the division page
+  directly)
 - `Player`: `id, name`
 - `Team`: `id, divisionId, name, playerIds[]`
 - Singles `Fixture`: `id, leagueId, divisionId, round, homePlayerId, awayPlayerId,
   raceTo, frames[], homeFrameScore, awayFrameScore, status, winnerPlayerId,
-  nextFixtureId, nextFixtureSlot, scheduledDate`
+  nextFixtureId, nextFixtureSlot, bracketRole, loserNextFixtureId,
+  loserNextFixtureSlot, resetFixtureId, scheduledDate`
   - `frames[]`: `{ frameNumber, winnerPlayerId }` — the source of truth; scores are
     derived from this list, never stored independently of it.
   - `scheduledDate`: `YYYY-MM-DD` string, set when the division's fixtures were
     generated with a start date and round gap; `null` otherwise.
 - Team `Fixture`: `id, leagueId, divisionId, round, homeTeamId, awayTeamId, legs[],
   homeLegsWon, awayLegsWon, status, winnerTeamId (null = draw), nextFixtureId,
-  nextFixtureSlot, scheduledDate`
+  nextFixtureSlot, bracketRole, loserNextFixtureId, loserNextFixtureSlot,
+  resetFixtureId, scheduledDate`
   - `legs[]`: `{ legNumber, homePlayerId, awayPlayerId, frames[], homeFrameScore,
     awayFrameScore, status, winnerPlayerId, raceTo }` — one leg per nominated
     player-vs-player mini-match, structurally identical to a singles fixture.
   - `nextFixtureId`/`nextFixtureSlot` (`'home'|'away'`) link a knockout fixture to the
     one its winner advances into; both are `null` for round-robin fixtures and for a
     knockout final.
+  - `bracketRole` (double elimination only, otherwise `'single'`):
+    `'winners'|'losers'|'grand_final'|'grand_final_reset'`. `loserNextFixtureId`/
+    `loserNextFixtureSlot` (winners-bracket fixtures only) link to where that
+    fixture's *loser* drops into the losers bracket. `resetFixtureId` is set on a
+    completed `grand_final` fixture once its bracket-reset decider has been created
+    (see **Knockout / double-elimination format** above).
 - `User` (unified account): `id, firstName, lastName, email, passwordHash, phone,
   venue, teamName, classification ('A'|'B'|'C'|'D'|null), isAdmin (bool), isCaptain
   (bool), status ('active'|'suspended'), playerId (linked Player, or null), createdAt`.
@@ -456,7 +485,7 @@ the Express server to serve) rather than Pages.
 | POST/DELETE | `/api/divisions/:id/players` | Register / remove a player by `playerId` (singles, pre-fixtures only; `playerId` must belong to a registered, active user) |
 | POST/DELETE | `/api/divisions/:id/teams` | Add / remove a team (teams, pre-fixtures only) |
 | POST/DELETE | `/api/teams/:teamId/players` | Add / remove a player by `playerId` on a team roster (same registered-user requirement) |
-| POST | `/api/divisions/:id/generate-fixtures` | Generate the fixture list (round robin or knockout bracket, per the division's `scheduling`); optionally accepts `{ startDate, gapDays }` to also set `scheduledDate` on every fixture |
+| POST | `/api/divisions/:id/generate-fixtures` | Generate the fixture list (round robin, single-elimination, or double-elimination bracket, per the division's `scheduling`; double elimination requires a power-of-two entrant count); optionally accepts `{ startDate, gapDays }` to also set `scheduledDate` on every fixture |
 | POST | `/api/divisions/:id/substitute-player` | Swap a player out for a replacement (singles only) - reassigns not-yet-started fixtures, leaves completed/in-progress ones alone; `reason: 'substitution'` (default) keeps the outgoing player on the League Table, `reason: 'retirement'` removes them from it (requires admin; logged) |
 | GET | `/api/fixtures/:id` | Fixture detail (requires login; singles or team, includes `bothEntrantsKnown` for knockout TBD slots) |
 | POST | `/api/fixtures/:id/frames` | Record a frame winner (singles) |
@@ -479,8 +508,9 @@ the Express server to serve) rather than Pages.
    singles-focused).
 3. Password reset via email and email verification at registration (currently a
    forgotten password requires an admin to force-reset it).
-4. Further scheduling methods: home/away double round robin, double elimination,
-   mini-knockouts, and the ability to mix formats within one competition.
+4. Further scheduling methods: home/away double round robin, mini-knockouts, and the
+   ability to mix formats within one competition (double elimination is now
+   implemented - see **Knockout / double-elimination format** above).
 5. Seeded/ranked knockout brackets (current v1 seeds in registration order, not by
    past performance) and best-of-N handicaps.
 6. Deeper player statistics: form guides, break-and-continue / century-style stats if
